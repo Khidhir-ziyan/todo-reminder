@@ -1,5 +1,7 @@
 const chrono = require('chrono-node');
 
+// ==================== Mappings ====================
+
 // Mapping hari Indonesia ke angka (0=Min, 1=Sen, ..., 6=Sab)
 const hariMap = {
   'minggu': 0, 'senin': 1, 'selasa': 2, 'rabu': 3,
@@ -14,20 +16,262 @@ const waktuMap = {
   'sore': '16:00',
   'malam': '20:00',
   'subuh': '05:00',
+  'dini hari': '03:00',
 };
 
+// Kata-kata yang menandakan urgency
+const urgentKeywords = [
+  'urgent', 'segera', 'penting', 'penting banget', 'harus',
+  'deadline', 'terakhir', 'sesegera', 'darurat', 'mepet',
+  'kritis', 'wajib', 'gak bisa ditunda', 'tidak bisa ditunda',
+];
+
+// Kata-kata untuk kategori
+const categoryPatterns = {
+  kuliah: ['kuliah', 'kampus', 'tugas', 'skripsi', 'ujian', 'praktikum', 'makalah', 'seminar', 'sidang', 'kp', 'magang', 'lab', 'matkul', 'mata kuliah', 'dosen', 'asisten'],
+  kerja: ['kerja', 'kantor', 'meeting', 'rapat', 'presentasi', 'client', 'proyek', 'deadline', 'laporan', 'seminar', 'workshop', 'training'],
+  belanja: ['beli', 'belanja', 'belanja', 'beliin', 'beliin', 'toko', 'mall', 'pasar', 'grocery'],
+  kesehatan: ['obat', 'dokter', 'rumah sakit', 'rs', 'checkup', 'kontrol', 'vaksin', 'olahraga', 'gym', 'senam'],
+  pribadi: ['jalan', 'nongkrong', 'ketemu', 'kumpul', 'acara', 'undangan', 'nikahan', 'sunatan', 'ulang tahun', 'wisuda'],
+  keuangan: ['bayar', 'tagihan', 'cicilan', 'listrik', 'air', 'internet', 'pulsa', 'token', 'transfer', 'setor'],
+};
+
+// Stop words untuk task extraction
+const stopWords = [
+  'ingetin', 'ingatkan', 'reminder', 'remind', 'tolong',
+  'gw', 'gue', 'saya', 'aku', 'ku', 'dong', 'ya', 'nih',
+  'tentang', 'buat', 'untuk', 'agar', 'biar',
+  'di', 'pada', 'hari', 'tanggal', 'tgl',
+  'besok', 'lusa', 'sekarang', 'hari ini', 'nanti',
+  'pagi', 'siang', 'sore', 'malam', 'subuh',
+  'senin', 'selasa', 'rabu', 'kamis', 'jumat', 'sabtu', 'minggu',
+  'jam', 'depan', 'lagi', 'yang', 'dan', 'atau',
+];
+
+// ==================== Helper Functions ====================
+
 /**
- * Parse pesan natural language jadi { task, deadline, reminderTime }
+ * Deteksi urgency dari text
+ */
+function detectUrgency(text) {
+  const lower = text.toLowerCase();
+
+  // Cek keyword urgency
+  for (const keyword of urgentKeywords) {
+    if (lower.includes(keyword)) {
+      return 'urgent';
+    }
+  }
+
+  // Cek deadline yang sangat dekat (akan dihitung nanti di parseReminder)
+  return 'normal';
+}
+
+/**
+ * Deteksi kategori dari text
+ */
+function detectCategory(text) {
+  const lower = text.toLowerCase();
+
+  for (const [category, keywords] of Object.entries(categoryPatterns)) {
+    for (const keyword of keywords) {
+      if (lower.includes(keyword)) {
+        return category;
+      }
+    }
+  }
+
+  return 'general';
+}
+
+/**
+ * Ekstrak nama task dari pesan dengan konteks lebih baik
+ */
+function extractTaskName(text) {
+  let cleaned = text.toLowerCase().trim();
+
+  // Buang pattern waktu
+  cleaned = cleaned
+    .replace(/jam\s*\d{1,2}[:.]?\d{0,2}/g, '')
+    .replace(/\d+\s*hari\s*lagi/g, '')
+    .replace(/\d+\s*minggu\s*lagi/g, '')
+    .replace(/\d+\s*bulan\s*lagi/g, '')
+    .replace(/hari\s+(senin|selasa|rabu|kamis|jumat|sabtu|minggu|ahad)/g, '')
+    .replace(/(besok|lusa|sekarang|hari ini|nanti)/g, '')
+    .replace(/(pagi|siang|sore|malam|subuh|dini hari)/g, '');
+
+  // Buang kata urgency (bukan bagian dari task)
+  for (const keyword of urgentKeywords) {
+    cleaned = cleaned.replace(new RegExp(keyword, 'gi'), '');
+  }
+
+  // Buang stop words
+  for (const word of stopWords) {
+    const regex = new RegExp(`\\b${word}\\b`, 'gi');
+    cleaned = cleaned.replace(regex, '');
+  }
+
+  // Bersihkan spasi berlebih dan trim
+  cleaned = cleaned.replace(/\s+/g, ' ').trim();
+
+  // Kapitalisasi huruf pertama setiap kata
+  if (cleaned) {
+    cleaned = cleaned
+      .split(' ')
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ');
+  }
+
+  return cleaned;
+}
+
+/**
+ * Parse tanggal bahasa Indonesia manual
+ */
+function parseIndonesianDate(text) {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+  // "hari X" → cari hari berikutnya
+  for (const [hari, dayNum] of Object.entries(hariMap)) {
+    if (text.includes(`hari ${hari}`) || text.includes(hari)) {
+      const target = new Date(today);
+      const currentDay = target.getDay();
+      let daysUntil = dayNum - currentDay;
+      if (daysUntil <= 0) daysUntil += 7; // Kalau hari ini, ambil minggu depan
+      target.setDate(target.getDate() + daysUntil);
+      return target;
+    }
+  }
+
+  // "besok"
+  if (text.includes('besok')) {
+    const target = new Date(today);
+    target.setDate(target.getDate() + 1);
+    return target;
+  }
+
+  // "lusa"
+  if (text.includes('lusa')) {
+    const target = new Date(today);
+    target.setDate(target.getDate() + 2);
+    return target;
+  }
+
+  // "hari ini"
+  if (text.includes('hari ini')) {
+    return today;
+  }
+
+  // "nanti" → hari ini juga
+  if (text.includes('nanti') || text.includes('sebentar lagi')) {
+    return today;
+  }
+
+  // "X hari lagi"
+  const hariMatch = text.match(/(\d+)\s*hari\s*lagi/);
+  if (hariMatch) {
+    const target = new Date(today);
+    target.setDate(target.getDate() + parseInt(hariMatch[1]));
+    return target;
+  }
+
+  // "X minggu lagi"
+  const mingguMatch = text.match(/(\d+)\s*minggu\s*lagi/);
+  if (mingguMatch) {
+    const target = new Date(today);
+    target.setDate(target.getDate() + parseInt(mingguMatch[1]) * 7);
+    return target;
+  }
+
+  // "X bulan lagi"
+  const bulanMatch = text.match(/(\d+)\s*bulan\s*lagi/);
+  if (bulanMatch) {
+    const target = new Date(today);
+    target.setMonth(target.getMonth() + parseInt(bulanMatch[1]));
+    return target;
+  }
+
+  // "depan" → minggu depan
+  if (text.includes('depan')) {
+    const target = new Date(today);
+    target.setDate(target.getDate() + 7);
+    return target;
+  }
+
+  // "sekarang"
+  if (text.includes('sekarang')) {
+    return now;
+  }
+
+  return null;
+}
+
+/**
+ * Generate smart response berdasarkan konteks
+ */
+function generateSmartResponse(task, deadline, category, urgency) {
+  const now = new Date();
+  const diff = deadline - now;
+  const hoursLeft = Math.floor(diff / (1000 * 60 * 60));
+  const daysLeft = Math.floor(hoursLeft / 24);
+
+  let urgencyEmoji = '';
+  let urgencyNote = '';
+
+  // Update urgency berdasarkan waktu
+  if (daysLeft <= 0 && hoursLeft <= 0) {
+    urgency = 'overdue';
+    urgencyEmoji = '🚨';
+    urgencyNote = '⚠️ *Waktu sudah lewat!*';
+  } else if (daysLeft <= 1) {
+    urgency = 'urgent';
+    urgencyEmoji = '🔴';
+    urgencyNote = '⏰ *Deadline besok!*';
+  } else if (daysLeft <= 3) {
+    urgencyEmoji = '🟡';
+    urgencyNote = `📅 ${daysLeft} hari lagi`;
+  } else {
+    urgencyEmoji = '🟢';
+    urgencyNote = `📅 ${daysLeft} hari lagi`;
+  }
+
+  // Category emoji
+  const categoryEmojis = {
+    kuliah: '📚',
+    kerja: '💼',
+    belanja: '🛒',
+    kesehatan: '🏥',
+    pribadi: '🎉',
+    keuangan: '💰',
+    general: '📋',
+  };
+
+  const categoryEmoji = categoryEmojis[category] || '📋';
+
+  return { urgencyEmoji, urgencyNote, categoryEmoji };
+}
+
+// ==================== Main Parser ====================
+
+/**
+ * Parse pesan natural language jadi { task, deadline, reminderTime, category, urgency }
  *
  * Contoh input:
  * - "ingetin gw tugas A hari rabu"
- * - "reminder: meeting client besok pagi"
+ * - - "reminder: meeting client besok pagi"
  * - "beli susu 3 hari lagi"
  * - "presentasi senin depan jam 2 siang"
  */
 function parseReminder(text) {
   const original = text;
   text = text.toLowerCase().trim();
+
+  // Deteksi urgency
+  let urgency = detectUrgency(text);
+
+  // Deteksi kategori
+  const category = detectCategory(text);
 
   // Ambil waktu spesifik (jam berapa)
   let jamOverride = null;
@@ -82,6 +326,19 @@ function parseReminder(text) {
     }
   }
 
+  // Update urgency berdasarkan deadline
+  if (parsedDate) {
+    const now = new Date();
+    const diff = parsedDate - now;
+    const hoursLeft = diff / (1000 * 60 * 60);
+
+    if (hoursLeft <= 0) {
+      urgency = 'overdue';
+    } else if (hoursLeft <= 24) {
+      urgency = 'urgent';
+    }
+  }
+
   // Ekstrak task name — hapus kata-kata yang bukan task
   let task = extractTaskName(text);
 
@@ -103,109 +360,10 @@ function parseReminder(text) {
     task: task || original.trim(),
     deadline: parsedDate,
     reminderTime,
+    category,
+    urgency,
     raw: original,
   };
-}
-
-/**
- * Parse tanggal bahasa Indonesia manual
- */
-function parseIndonesianDate(text) {
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-
-  // "hari X" → cari hari berikutnya
-  for (const [hari, dayNum] of Object.entries(hariMap)) {
-    if (text.includes(`hari ${hari}`) || text.includes(hari)) {
-      const target = new Date(today);
-      const currentDay = target.getDay();
-      let daysUntil = dayNum - currentDay;
-      if (daysUntil <= 0) daysUntil += 7; // Kalau hari ini, ambil minggu depan
-      target.setDate(target.getDate() + daysUntil);
-      return target;
-    }
-  }
-
-  // "besok"
-  if (text.includes('besok')) {
-    const target = new Date(today);
-    target.setDate(target.getDate() + 1);
-    return target;
-  }
-
-  // "lusa"
-  if (text.includes('lusa')) {
-    const target = new Date(today);
-    target.setDate(target.getDate() + 2);
-    return target;
-  }
-
-  // "X hari lagi"
-  const hariMatch = text.match(/(\d+)\s*hari\s*lagi/);
-  if (hariMatch) {
-    const target = new Date(today);
-    target.setDate(target.getDate() + parseInt(hariMatch[1]));
-    return target;
-  }
-
-  // "X minggu lagi"
-  const mingguMatch = text.match(/(\d+)\s*minggu\s*lagi/);
-  if (mingguMatch) {
-    const target = new Date(today);
-    target.setDate(target.getDate() + parseInt(mingguMatch[1]) * 7);
-    return target;
-  }
-
-  // "hari ini"
-  if (text.includes('hari ini')) {
-    return today;
-  }
-
-  // "sekarang"
-  if (text.includes('sekarang')) {
-    return now;
-  }
-
-  return null;
-}
-
-/**
- * Ekstrak nama task dari pesan, buang kata-kata perintah
- */
-function extractTaskName(text) {
-  // Buang kata-kata perintah
-  const stopWords = [
-    'ingetin', 'ingatkan', 'reminder', 'remind', 'tolong',
-    'gw', 'gue', 'saya', 'aku', 'ku',
-    'tentang', 'buat', 'untuk',
-    'di', 'pada', 'hari', 'tanggal',
-    'besok', 'lusa', 'sekarang', 'hari ini',
-    'pagi', 'siang', 'sore', 'malam', 'subuh',
-    'senin', 'selasa', 'rabu', 'kamis', 'jumat', 'sabtu', 'minggu',
-    'jam', 'depan', 'lagi',
-  ];
-
-  // Buang pattern waktu
-  let cleaned = text
-    .replace(/jam\s*\d{1,2}[:.]?\d{0,2}/g, '')
-    .replace(/\d+\s*hari\s*lagi/g, '')
-    .replace(/\d+\s*minggu\s*lagi/g, '');
-
-  // Buang stop words
-  for (const word of stopWords) {
-    const regex = new RegExp(`\\b${word}\\b`, 'gi');
-    cleaned = cleaned.replace(regex, '');
-  }
-
-  // Bersihkan spasi berlebih
-  cleaned = cleaned.replace(/\s+/g, ' ').trim();
-
-  // Kapitalisasi huruf pertama
-  if (cleaned) {
-    cleaned = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
-  }
-
-  return cleaned;
 }
 
 /**
@@ -230,4 +388,29 @@ function formatDate(date) {
   return `${dayName}, ${day} ${month} ${year} jam ${hours}:${minutes}`;
 }
 
-module.exports = { parseReminder, formatDate };
+/**
+ * Generate hint untuk user jika input ambigu
+ */
+function generateHint(text) {
+  const lower = text.toLowerCase();
+  const hints = [];
+
+  // Cek apakah ada waktu
+  const hasTime = lower.match(/jam\s*\d/) || lower.includes('pagi') || lower.includes('siang') ||
+    lower.includes('sore') || lower.includes('malam') || lower.includes('besok') ||
+    lower.includes('lusa') || lower.match(/\d+\s*hari/);
+
+  if (!hasTime) {
+    hints.push('⏰ Kapan deadline-nya? Tambahkan waktu, contoh: "besok jam 3 sore"');
+  }
+
+  // Cek apakah ada task yang jelas
+  const task = extractTaskName(text);
+  if (!task || task.length < 3) {
+    hints.push('📋 Apa task-nya? Sebutkan dengan jelas, contoh: "Tugas A" atau "Meeting client"');
+  }
+
+  return hints;
+}
+
+module.exports = { parseReminder, formatDate, generateHint, detectCategory, detectUrgency };
