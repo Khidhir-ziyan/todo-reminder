@@ -25,24 +25,33 @@ db.exec(`
     reminded INTEGER DEFAULT 0,
     priority TEXT DEFAULT 'normal',
     category TEXT DEFAULT 'general',
+    recurring TEXT DEFAULT NULL,
+    recurring_parent_id INTEGER DEFAULT NULL,
+    snoozed_until TEXT DEFAULT NULL,
     created_at TEXT DEFAULT (datetime('now', 'localtime'))
   )
 `);
 
 // Tambah kolom baru jika belum ada (migration)
-try {
-  db.exec(`ALTER TABLE todos ADD COLUMN priority TEXT DEFAULT 'normal'`);
-} catch (e) { /* kolom sudah ada */ }
+const columns = [
+  { name: 'priority', type: "TEXT DEFAULT 'normal'" },
+  { name: 'category', type: "TEXT DEFAULT 'general'" },
+  { name: 'recurring', type: 'TEXT DEFAULT NULL' },
+  { name: 'recurring_parent_id', type: 'INTEGER DEFAULT NULL' },
+  { name: 'snoozed_until', type: 'TEXT DEFAULT NULL' },
+];
 
-try {
-  db.exec(`ALTER TABLE todos ADD COLUMN category TEXT DEFAULT 'general'`);
-} catch (e) { /* kolom sudah ada */ }
+for (const col of columns) {
+  try {
+    db.exec(`ALTER TABLE todos ADD COLUMN ${col.name} ${col.type}`);
+  } catch (e) { /* kolom sudah ada */ }
+}
 
 const queries = {
   // Tambah todo baru
   addTodo: db.prepare(`
-    INSERT INTO todos (chat_id, task, deadline, reminder_time, email, priority, category)
-    VALUES (@chatId, @task, @deadline, @reminderTime, @email, @priority, @category)
+    INSERT INTO todos (chat_id, task, deadline, reminder_time, email, priority, category, recurring, recurring_parent_id)
+    VALUES (@chatId, @task, @deadline, @reminderTime, @email, @priority, @category, @recurring, @recurringParentId)
   `),
 
   // Ambil semua todo berdasarkan chat_id
@@ -83,6 +92,16 @@ const queries = {
     ORDER BY deadline ASC
   `),
 
+  // Ambil todo untuk minggu tertentu
+  getWeekTodos: db.prepare(`
+    SELECT * FROM todos
+    WHERE chat_id = ?
+    AND status = 'pending'
+    AND date(deadline) >= date(?)
+    AND date(deadline) <= date(?)
+    ORDER BY deadline ASC
+  `),
+
   // Cari todo berdasarkan keyword
   searchTodos: db.prepare(`
     SELECT * FROM todos
@@ -100,15 +119,13 @@ const queries = {
     ORDER BY deadline ASC
   `),
 
-  // Ambil statistik
-  getStats: db.prepare(`
-    SELECT
-      COUNT(*) as total,
-      SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) as completed,
-      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-      SUM(CASE WHEN status = 'pending' AND deadline < datetime('now', 'localtime') THEN 1 ELSE 0 END) as overdue
-    FROM todos
+  // Ambil todo berdasarkan prioritas
+  getTodosByPriority: db.prepare(`
+    SELECT * FROM todos
     WHERE chat_id = ?
+    AND status = 'pending'
+    AND priority = ?
+    ORDER BY deadline ASC
   `),
 
   // Ambil todo berdasarkan kategori
@@ -120,12 +137,39 @@ const queries = {
     ORDER BY deadline ASC
   `),
 
+  // Ambil statistik
+  getStats: db.prepare(`
+    SELECT
+      COUNT(*) as total,
+      SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) as completed,
+      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+      SUM(CASE WHEN status = 'pending' AND deadline < datetime('now', 'localtime') THEN 1 ELSE 0 END) as overdue,
+      SUM(CASE WHEN priority = 'urgent' AND status = 'pending' THEN 1 ELSE 0 END) as urgent,
+      SUM(CASE WHEN priority = 'normal' AND status = 'pending' THEN 1 ELSE 0 END) as normal_priority,
+      SUM(CASE WHEN priority = 'low' AND status = 'pending' THEN 1 ELSE 0 END) as low_priority
+    FROM todos
+    WHERE chat_id = ?
+  `),
+
+  // Ambil semua chat_id unik (untuk daily summary)
+  getAllChatIds: db.prepare(`
+    SELECT DISTINCT chat_id FROM todos
+  `),
+
   // Ambil todo yang perlu di-reminder (waktu reminder sudah lewat, belum di-reminder)
   getDueReminders: db.prepare(`
     SELECT * FROM todos
     WHERE status = 'pending'
     AND reminded = 0
     AND reminder_time <= datetime('now', 'localtime')
+  `),
+
+  // Ambil todo recurring yang perlu dibuat ulang
+  getDueRecurring: db.prepare(`
+    SELECT * FROM todos
+    WHERE status = 'done'
+    AND recurring IS NOT NULL
+    AND recurring_parent_id IS NULL
   `),
 
   // Tandai sudah di-reminder
@@ -151,6 +195,16 @@ const queries = {
   // Update priority
   updatePriority: db.prepare(`
     UPDATE todos SET priority = ? WHERE id = ? AND chat_id = ?
+  `),
+
+  // Snooze todo
+  snoozeTodo: db.prepare(`
+    UPDATE todos SET snoozed_until = ?, reminded = 0 WHERE id = ? AND chat_id = ?
+  `),
+
+  // Get todo by ID
+  getTodoById: db.prepare(`
+    SELECT * FROM todos WHERE id = ?
   `),
 };
 

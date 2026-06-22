@@ -1,5 +1,5 @@
-const { Telegraf } = require('telegraf');
-const { parseReminder, formatDate, generateHint, detectCategory, detectUrgency } = require('./parser');
+const { Telegraf, Markup } = require('telegraf');
+const { parseReminder, formatDate, generateHint, detectCategory, detectUrgency, detectRecurring } = require('./parser');
 const { queries } = require('./db');
 const { sendReminder } = require('./email');
 const { parseWithLLM, generateResponse, generateHintWithLLM } = require('./llm');
@@ -20,70 +20,10 @@ const userEmails = new Map();
 
 const TEMP_DIR = path.join(__dirname, '..', 'temp');
 
-// ==================== Hybrid Parser (LLM + Regex) ====================
-
-async function parseReminderHybrid(text) {
-  // Coba LLM dulu
-  const llmResult = await parseWithLLM(text);
-
-  if (llmResult && llmResult.confidence >= 0.5) {
-    // LLM berhasil parse dengan confidence tinggi
-    const deadline = new Date(`${llmResult.date}T${llmResult.time || '09:00'}:00`);
-
-    // Validasi tanggal
-    if (!isNaN(deadline.getTime())) {
-      // Hitung reminder time
-      let reminderTime;
-      const now = new Date();
-
-      if (llmResult.reminder_time) {
-        // User tentukan jam reminder sendiri
-        reminderTime = new Date(deadline);
-        const [rh, rm] = llmResult.reminder_time.split(':').map(Number);
-        reminderTime.setHours(rh, rm, 0, 0);
-
-        // Jika reminder jam > deadline jam, reminder adalah hari sebelumnya
-        if (reminderTime >= deadline) {
-          reminderTime.setDate(reminderTime.getDate() - 1);
-        }
-      } else {
-        // Default logic
-        reminderTime = new Date(deadline);
-        if (deadline.getHours() <= 10) {
-          reminderTime.setDate(reminderTime.getDate() - 1);
-          reminderTime.setHours(20, 0, 0, 0);
-        } else {
-          reminderTime.setHours(reminderTime.getHours() - 1);
-        }
-      }
-
-      // Jika reminder time sudah lewat, set ke 1 menit dari sekarang
-      if (reminderTime <= now) {
-        reminderTime = new Date(now.getTime() + 60 * 1000);
-      }
-
-      return {
-        task: llmResult.task,
-        deadline: deadline,
-        reminderTime: reminderTime,
-        category: llmResult.category || 'general',
-        urgency: llmResult.urgency || 'normal',
-        raw: text,
-        source: 'llm',
-      };
-    }
-  }
-
-  // Fallback ke regex parser
-  const regexResult = parseReminder(text);
-  return { ...regexResult, source: 'regex' };
-}
-
 // ==================== Voice Processing ====================
 
 async function transcribeAudio(audioFilePath) {
   try {
-    // Support API key atau default credentials
     const clientOptions = process.env.GOOGLE_CLOUD_API_KEY
       ? { apiKey: process.env.GOOGLE_CLOUD_API_KEY }
       : {};
@@ -162,9 +102,24 @@ function cleanupFile(filePath) {
   }, 5000);
 }
 
+// ==================== Inline Keyboard ====================
+
+function getActionButtons(todoId) {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback('✅ Done', `done_${todoId}`),
+      Markup.button.callback('⏰ Snooze 10m', `snooze_${todoId}_10`),
+      Markup.button.callback('⏰ Snooze 1h', `snooze_${todoId}_60`),
+    ],
+    [
+      Markup.button.callback('🗑️ Hapus', `delete_${todoId}`),
+    ]
+  ]);
+}
+
 // ==================== Save Todo Helper ====================
 
-function saveTodo(ctx, task, deadline, reminderTime, category = 'general', urgency = 'normal') {
+function saveTodo(ctx, task, deadline, reminderTime, category = 'general', urgency = 'normal', recurring = null) {
   const email = userEmails.get(ctx.chat.id) || defaultEmail;
 
   if (!email) {
@@ -182,16 +137,15 @@ function saveTodo(ctx, task, deadline, reminderTime, category = 'general', urgen
     email: email,
     priority: urgency,
     category: category,
+    recurring: recurring,
+    recurringParentId: null,
   });
+
+  // Get the inserted todo ID
+  const insertedTodo = queries.getTodosByChat.all(ctx.chat.id).pop();
 
   const deadlineStr = formatDate(deadline);
   const reminderStr = formatDate(reminderTime);
-
-  // Smart response berdasarkan konteks
-  const now = new Date();
-  const diff = deadline - now;
-  const hoursLeft = Math.floor(diff / (1000 * 60 * 60));
-  const daysLeft = Math.floor(hoursLeft / 24);
 
   // Category emoji
   const categoryEmojis = {
@@ -205,17 +159,33 @@ function saveTodo(ctx, task, deadline, reminderTime, category = 'general', urgen
   };
   const categoryEmoji = categoryEmojis[category] || '📋';
 
-  // Urgency indicator
-  let urgencyIndicator = '';
-  if (urgency === 'urgent' || daysLeft <= 1) {
-    urgencyIndicator = '🔴 *URGENT!* ';
-  } else if (daysLeft <= 3) {
-    urgencyIndicator = '🟡 ';
+  // Priority indicator
+  let priorityIndicator = '';
+  if (urgency === 'urgent') {
+    priorityIndicator = '🔴 ';
+  } else if (urgency === 'low') {
+    priorityIndicator = '🟢 ';
   } else {
-    urgencyIndicator = '🟢 ';
+    priorityIndicator = '🟡 ';
+  }
+
+  // Recurring indicator
+  let recurringText = '';
+  if (recurring) {
+    const recurringLabels = {
+      daily: '🔄 Setiap hari',
+      weekly: '🔄 Setiap minggu',
+      monthly: '🔄 Setiap bulan',
+    };
+    recurringText = `\n🔁 *Recurring:* ${recurringLabels[recurring] || recurring}`;
   }
 
   // Time context
+  const now = new Date();
+  const diff = deadline - now;
+  const hoursLeft = Math.floor(diff / (1000 * 60 * 60));
+  const daysLeft = Math.floor(hoursLeft / 24);
+
   let timeContext = '';
   if (daysLeft <= 0 && hoursLeft <= 0) {
     timeContext = '⚠️ *Waktu sudah lewat!*';
@@ -228,16 +198,68 @@ function saveTodo(ctx, task, deadline, reminderTime, category = 'general', urgen
   }
 
   ctx.reply(
-    `${urgencyIndicator}✅ *Reminder disimpan!*\n\n` +
+    `${priorityIndicator}✅ *Reminder disimpan!*\n\n` +
     `${categoryEmoji} *Task:* ${task}\n` +
     `📅 *Deadline:* ${deadlineStr}\n` +
     `⏰ *Reminder:* ${reminderStr}\n` +
-    `📧 *Email:* ${email}\n` +
-    (timeContext ? `\n${timeContext}` : ''),
+    `📧 *Email:* ${email}` +
+    recurringText +
+    (timeContext ? `\n\n${timeContext}` : ''),
     { parse_mode: 'Markdown' }
   );
 
   return true;
+}
+
+// ==================== Hybrid Parser ====================
+
+async function parseReminderHybrid(text) {
+  const llmResult = await parseWithLLM(text);
+
+  if (llmResult && llmResult.confidence >= 0.5) {
+    const deadline = new Date(`${llmResult.date}T${llmResult.time || '09:00'}:00`);
+
+    if (!isNaN(deadline.getTime())) {
+      let reminderTime;
+      const now = new Date();
+
+      if (llmResult.reminder_time) {
+        reminderTime = new Date(deadline);
+        const [rh, rm] = llmResult.reminder_time.split(':').map(Number);
+        reminderTime.setHours(rh, rm, 0, 0);
+
+        if (reminderTime >= deadline) {
+          reminderTime.setDate(reminderTime.getDate() - 1);
+        }
+      } else {
+        reminderTime = new Date(deadline);
+        if (deadline.getHours() <= 10) {
+          reminderTime.setDate(reminderTime.getDate() - 1);
+          reminderTime.setHours(20, 0, 0, 0);
+        } else {
+          reminderTime.setHours(reminderTime.getHours() - 1);
+        }
+      }
+
+      if (reminderTime <= now) {
+        reminderTime = new Date(now.getTime() + 60 * 1000);
+      }
+
+      return {
+        task: llmResult.task,
+        deadline: deadline,
+        reminderTime: reminderTime,
+        category: llmResult.category || 'general',
+        urgency: llmResult.urgency || 'normal',
+        recurring: llmResult.recurring || null,
+        raw: text,
+        source: 'llm',
+      };
+    }
+  }
+
+  const regexResult = parseReminder(text);
+  return { ...regexResult, source: 'regex' };
 }
 
 // ==================== Bot Initialization ====================
@@ -245,7 +267,6 @@ function saveTodo(ctx, task, deadline, reminderTime, category = 'general', urgen
 function initBot() {
   bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
-  // Pastiin folder temp ada
   fs.mkdirSync(TEMP_DIR, { recursive: true });
 
   // Middleware: log setiap pesan
@@ -254,6 +275,92 @@ function initBot() {
     const text = ctx.message?.text || ctx.message?.voice ? '[voice]' : '';
     console.log(`💬 [${chatId}] ${text}`);
     return next();
+  });
+
+  // ==================== Inline Button Handlers ====================
+
+  bot.action(/^done_(\d+)$/, async (ctx) => {
+    const todoId = parseInt(ctx.match[1]);
+    const todo = queries.getTodoById.get(todoId);
+
+    if (!todo) {
+      return ctx.answerCbQuery('❌ Todo tidak ditemukan');
+    }
+
+    queries.markDone.run(todoId, todo.chat_id);
+    await ctx.answerCbQuery('✅ Ditandai selesai!');
+
+    // Edit message to show completed
+    await ctx.editMessageText(
+      `✅ *"${todo.task}"* ditandai selesai! 🎉`,
+      { parse_mode: 'Markdown' }
+    );
+
+    // If recurring, create next occurrence
+    if (todo.recurring) {
+      const nextDeadline = getNextRecurringDate(new Date(todo.deadline), todo.recurring);
+      const nextReminder = new Date(nextDeadline);
+      if (nextDeadline.getHours() <= 10) {
+        nextReminder.setDate(nextReminder.getDate() - 1);
+        nextReminder.setHours(20, 0, 0, 0);
+      } else {
+        nextReminder.setHours(nextReminder.getHours() - 1);
+      }
+
+      queries.addTodo.run({
+        chatId: todo.chat_id,
+        task: todo.task,
+        deadline: nextDeadline.toISOString(),
+        reminderTime: nextReminder.toISOString(),
+        email: todo.email,
+        priority: todo.priority,
+        category: todo.category,
+        recurring: todo.recurring,
+        recurringParentId: todoId,
+      });
+
+      ctx.reply(
+        `🔁 *Recurring:* "${todo.task}" dijadwalkan ulang\n📅 Deadline: ${formatDate(nextDeadline)}`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+  });
+
+  bot.action(/^snooze_(\d+)_(\d+)$/, async (ctx) => {
+    const todoId = parseInt(ctx.match[1]);
+    const minutes = parseInt(ctx.match[2]);
+    const todo = queries.getTodoById.get(todoId);
+
+    if (!todo) {
+      return ctx.answerCbQuery('❌ Todo tidak ditemukan');
+    }
+
+    const snoozeUntil = new Date(Date.now() + minutes * 60 * 1000);
+    queries.snoozeTodo.run(snoozeUntil.toISOString(), todoId, todo.chat_id);
+
+    await ctx.answerCbQuery(`⏰ Di-snooze ${minutes} menit`);
+
+    await ctx.editMessageText(
+      `⏰ *"${todo.task}"* di-snooze ${minutes} menit\n📅 Reminder: ${formatDate(snoozeUntil)}`,
+      { parse_mode: 'Markdown' }
+    );
+  });
+
+  bot.action(/^delete_(\d+)$/, async (ctx) => {
+    const todoId = parseInt(ctx.match[1]);
+    const todo = queries.getTodoById.get(todoId);
+
+    if (!todo) {
+      return ctx.answerCbQuery('❌ Todo tidak ditemukan');
+    }
+
+    queries.deleteTodo.run(todoId, todo.chat_id);
+    await ctx.answerCbQuery('🗑️ Dihapus!');
+
+    await ctx.editMessageText(
+      `🗑️ *"${todo.task}"* dihapus!`,
+      { parse_mode: 'Markdown' }
+    );
   });
 
   // ==================== Commands ====================
@@ -272,6 +379,7 @@ function initBot() {
       `/today — Todo hari ini\n` +
       `/tomorrow — Todo besok\n` +
       `/upcoming — 7 hari ke depan\n` +
+      `/calendar — Kalender mingguan\n` +
       `/list — Semua todo\n` +
       `/stats — Statistik\n` +
       `/search <keyword> — Cari todo\n` +
@@ -280,7 +388,7 @@ function initBot() {
       `*Contoh input:*\n` +
       `• "Tugas A besok jam 3 sore"\n` +
       `• "Meeting client senin depan"\n` +
-      `• "Beli susu 3 hari lagi"`,
+      `• "Olahraga setiap senin jam 6 pagi"`,
       { parse_mode: 'Markdown' }
     );
   });
@@ -298,21 +406,19 @@ function initBot() {
       `/today — Hari ini\n` +
       `/tomorrow — Besok\n` +
       `/upcoming — 7 hari ke depan\n` +
+      `/calendar — Kalender mingguan\n` +
       `/search <keyword> — Cari todo\n` +
       `/stats — Statistik\n\n` +
       `*⚙️ Settings:*\n` +
       `/setemail <email> — Set email reminder\n\n` +
-      `*🎤 Voice Note:*\n` +
-      `Kirim voice note dengan tugas dan waktu\n\n` +
-      `*Format Waktu:*\n` +
-      `• hari senin/selasa/rabu/...\n` +
-      `• besok / lusa / nanti\n` +
-      `• 3 hari lagi / 2 minggu lagi\n` +
-      `• jam 14:00 / jam 2 siang\n\n` +
+      `*🔄 Recurring:*\n` +
+      `"Olahraga setiap senin jam 6 pagi"\n` +
+      `"Minum obat setiap hari jam 8"\n\n` +
       `*💡 Tips:*\n` +
       `• Tambah kata "urgent" untuk prioritas tinggi\n` +
       `• Gw auto-detect kategori (kuliah, kerja, dll)\n` +
-      `• Kirim teks langsung, gw coba pahami!`,
+      `• Kirim teks langsung, gw coba pahami!\n` +
+      `• Ketik "help" atau "bantuan" untuk bantuan`,
       { parse_mode: 'Markdown' }
     );
   });
@@ -341,14 +447,13 @@ function initBot() {
         `Contoh:\n` +
         `• /remind tugas A hari rabu\n` +
         `• /remind beli susu besok pagi\n` +
-        `• /remind meeting urgent senin depan`
+        `• /remind olahraga setiap senin jam 6 pagi`
       );
     }
 
     const result = await parseReminderHybrid(taskText);
 
     if (!result.deadline) {
-      // Beri hint yang helpful (coba LLM dulu)
       const llmHint = await generateHintWithLLM(taskText);
       const hints = generateHint(taskText);
 
@@ -363,12 +468,12 @@ function initBot() {
       msg += `*Contoh:*\n` +
         `• /remind tugas A hari rabu\n` +
         `• /remind beli susu besok pagi\n` +
-        `• /remind meeting 3 hari lagi`;
+        `• /remind olahraga setiap senin jam 6`;
 
       return ctx.reply(msg, { parse_mode: 'Markdown' });
     }
 
-    saveTodo(ctx, result.task, result.deadline, result.reminderTime, result.category, result.urgency);
+    saveTodo(ctx, result.task, result.deadline, result.reminderTime, result.category, result.urgency, result.recurring);
   });
 
   // /today
@@ -386,8 +491,9 @@ function initBot() {
       const minutes = String(deadline.getMinutes()).padStart(2, '0');
       const status = todo.status === 'done' ? '✅' : '⏳';
       const categoryEmoji = getCategoryEmoji(todo.category);
+      const priorityEmoji = getPriorityEmoji(todo.priority);
 
-      msg += `${i + 1}. ${status} ${categoryEmoji} *${todo.task}*\n`;
+      msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.task}*\n`;
       msg += `   ⏰ Jam ${hours}:${minutes}\n\n`;
     });
 
@@ -410,8 +516,9 @@ function initBot() {
       const minutes = String(deadline.getMinutes()).padStart(2, '0');
       const status = todo.status === 'done' ? '✅' : '⏳';
       const categoryEmoji = getCategoryEmoji(todo.category);
+      const priorityEmoji = getPriorityEmoji(todo.priority);
 
-      msg += `${i + 1}. ${status} ${categoryEmoji} *${todo.task}*\n`;
+      msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.task}*\n`;
       msg += `   ⏰ Jam ${hours}:${minutes}\n\n`;
     });
 
@@ -429,7 +536,6 @@ function initBot() {
 
     let msg = `📋 *Todo 7 Hari Ke Depan (${todos.length}):*\n\n`;
 
-    // Group by day
     const grouped = {};
     todos.forEach(todo => {
       const deadline = new Date(todo.deadline);
@@ -450,13 +556,63 @@ function initBot() {
         const minutes = String(deadline.getMinutes()).padStart(2, '0');
         const status = todo.status === 'done' ? '✅' : '⏳';
         const categoryEmoji = getCategoryEmoji(todo.category);
+        const priorityEmoji = getPriorityEmoji(todo.priority);
+        const recurringEmoji = todo.recurring ? '🔁' : '';
 
-        msg += `  ${status} ${categoryEmoji} ${todo.task} (⏰${hours}:${minutes})\n`;
+        msg += `  ${status} ${priorityEmoji} ${categoryEmoji} ${todo.task} ${recurringEmoji} (⏰${hours}:${minutes})\n`;
       });
       msg += '\n';
     }
 
     msg += `/done <nomor> — Tandai selesai`;
+    ctx.reply(msg, { parse_mode: 'Markdown' });
+  });
+
+  // /calendar
+  bot.command('calendar', (ctx) => {
+    const today = new Date();
+    const startOfWeek = new Date(today);
+    startOfWeek.setDate(today.getDate() - today.getDay() + 1); // Monday
+
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(startOfWeek.getDate() + 6); // Sunday
+
+    const todos = queries.getWeekTodos.all(ctx.chat.id, startOfWeek.toISOString().split('T')[0], endOfWeek.toISOString().split('T')[0]);
+
+    const days = ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min'];
+    const dayEmojis = ['📅', '📅', '📅', '📅', '📅', '🎉', '🎉'];
+
+    let msg = `📅 *Kalender Minggu Ini*\n`;
+    msg += `${formatDate(startOfWeek)} - ${formatDate(endOfWeek)}\n\n`;
+
+    for (let i = 0; i < 7; i++) {
+      const date = new Date(startOfWeek);
+      date.setDate(startOfWeek.getDate() + i);
+      const isToday = date.toDateString() === today.toDateString();
+
+      const dayTodos = todos.filter(t => {
+        const deadline = new Date(t.deadline);
+        return deadline.toDateString() === date.toDateString();
+      });
+
+      const dayLabel = isToday ? `*▸ ${days[i]} ${date.getDate()} ◂*` : `*${days[i]} ${date.getDate()}*`;
+
+      if (dayTodos.length === 0) {
+        msg += `${dayEmojis[i]} ${dayLabel}: -\n`;
+      } else {
+        msg += `${dayEmojis[i]} ${dayLabel}:\n`;
+        dayTodos.forEach(todo => {
+          const deadline = new Date(todo.deadline);
+          const hours = String(deadline.getHours()).padStart(2, '0');
+          const minutes = String(deadline.getMinutes()).padStart(2, '0');
+          const status = todo.status === 'done' ? '✅' : '⏳';
+          const priorityEmoji = getPriorityEmoji(todo.priority);
+
+          msg += `   ${status} ${priorityEmoji} ${todo.task} (${hours}:${minutes})\n`;
+        });
+      }
+    }
+
     ctx.reply(msg, { parse_mode: 'Markdown' });
   });
 
@@ -479,9 +635,13 @@ function initBot() {
       msg += `🚨 Overdue: *${stats.overdue}*\n`;
     }
 
+    msg += `\n*Prioritas:*\n`;
+    msg += `🔴 Urgent: *${stats.urgent || 0}*\n`;
+    msg += `🟡 Normal: *${stats.normal_priority || 0}*\n`;
+    msg += `🟢 Low: *${stats.low_priority || 0}*\n`;
+
     msg += `\n📈 Tingkat penyelesaian: *${completionRate}%*\n`;
 
-    // Motivasi
     if (completionRate >= 80) {
       msg += `\n🎉 *Hebat!* Kamu produktif banget!`;
     } else if (completionRate >= 50) {
@@ -513,8 +673,9 @@ function initBot() {
       const deadline = formatDate(new Date(todo.deadline));
       const status = todo.status === 'done' ? '✅' : '⏳';
       const categoryEmoji = getCategoryEmoji(todo.category);
+      const priorityEmoji = getPriorityEmoji(todo.priority);
 
-      msg += `${i + 1}. ${status} ${categoryEmoji} *${todo.task}*\n`;
+      msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.task}*\n`;
       msg += `   📅 ${deadline}\n\n`;
     });
 
@@ -529,7 +690,6 @@ function initBot() {
       return ctx.reply('📭 Tidak ada todo! Tambah dengan /remind atau kirim voice note.');
     }
 
-    // Cek overdue
     const overdue = todos.filter(t => t.status === 'pending' && new Date(t.deadline) < new Date());
     let msg = '';
 
@@ -542,9 +702,11 @@ function initBot() {
       const deadline = formatDate(new Date(todo.deadline));
       const status = todo.status === 'done' ? '✅' : (todo.reminded ? '🔔' : '⏳');
       const categoryEmoji = getCategoryEmoji(todo.category);
+      const priorityEmoji = getPriorityEmoji(todo.priority);
       const isOverdue = todo.status === 'pending' && new Date(todo.deadline) < new Date();
+      const recurringEmoji = todo.recurring ? '🔁' : '';
 
-      msg += `${i + 1}. ${status} ${categoryEmoji} *${todo.task}*${isOverdue ? ' ⚠️' : ''}\n`;
+      msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.task}*${isOverdue ? ' ⚠️' : ''} ${recurringEmoji}\n`;
       msg += `   📅 ${deadline}\n`;
       msg += `   🆔 ID: \`${todo.id}\`\n\n`;
     });
@@ -571,21 +733,47 @@ function initBot() {
     const todo = todos[index];
     queries.markDone.run(todo.id, ctx.chat.id);
 
-    // Smart response berdasarkan konteks
     const now = new Date();
     const deadline = new Date(todo.deadline);
     const isOnTime = deadline >= now;
 
     let msg = '';
     if (isOnTime) {
-      msg = `✅ *"${todo.task}"* ditandai selesai! 🎉\n\n` +
-        `💪 *Tepat waktu! Good job!*`;
+      msg = `✅ *"${todo.task}"* ditandai selesai! 🎉\n\n💪 *Tepat waktu! Good job!*`;
     } else {
-      msg = `✅ *"${todo.task}"* ditandai selesai!\n\n` +
-        `⏰ *Agak telat, tapi better late than never!*`;
+      msg = `✅ *"${todo.task}"* ditandai selesai!\n\n⏰ *Agak telat, tapi better late than never!*`;
     }
 
     ctx.reply(msg, { parse_mode: 'Markdown' });
+
+    // If recurring, create next occurrence
+    if (todo.recurring) {
+      const nextDeadline = getNextRecurringDate(new Date(todo.deadline), todo.recurring);
+      const nextReminder = new Date(nextDeadline);
+      if (nextDeadline.getHours() <= 10) {
+        nextReminder.setDate(nextReminder.getDate() - 1);
+        nextReminder.setHours(20, 0, 0, 0);
+      } else {
+        nextReminder.setHours(nextReminder.getHours() - 1);
+      }
+
+      queries.addTodo.run({
+        chatId: todo.chat_id,
+        task: todo.task,
+        deadline: nextDeadline.toISOString(),
+        reminderTime: nextReminder.toISOString(),
+        email: todo.email,
+        priority: todo.priority,
+        category: todo.category,
+        recurring: todo.recurring,
+        recurringParentId: todo.id,
+      });
+
+      ctx.reply(
+        `🔁 *Recurring:* "${todo.task}" dijadwalkan ulang\n📅 Deadline: ${formatDate(nextDeadline)}`,
+        { parse_mode: 'Markdown' }
+      );
+    }
   });
 
   // /delete
@@ -628,7 +816,6 @@ function initBot() {
       await ctx.reply('📝 Transcribing...');
       const transcription = await transcribeAudio(wavPath);
 
-      // Cleanup temp files
       cleanupFile(oggPath);
       cleanupFile(wavPath);
 
@@ -636,11 +823,9 @@ function initBot() {
         return ctx.reply('❌ Gagal transcribe voice note. Coba lagi ya.');
       }
 
-      // Parse todo dari text (pakai hybrid)
       const result = await parseReminderHybrid(transcription);
 
       if (!result.deadline) {
-        // Beri hint (coba LLM dulu)
         const llmHint = await generateHintWithLLM(transcription);
         const hints = generateHint(transcription);
 
@@ -657,10 +842,9 @@ function initBot() {
         return ctx.reply(msg, { parse_mode: 'Markdown' });
       }
 
-      const saved = saveTodo(ctx, result.task, result.deadline, result.reminderTime, result.category, result.urgency);
+      const saved = saveTodo(ctx, result.task, result.deadline, result.reminderTime, result.category, result.urgency, result.recurring);
 
       if (saved) {
-        // Tambahkan info transcribe
         ctx.reply(
           `🎤 *Voice Note:* "${transcription}"`,
           { parse_mode: 'Markdown' }
@@ -678,16 +862,14 @@ function initBot() {
     const text = ctx.message.text;
     const lower = text.toLowerCase().trim();
 
-    // Skip commands
     if (text.startsWith('/')) return;
 
     // ==================== Natural Language Commands ====================
 
-    // "list todo", "lihat todo", "todo list", "lihat semua todo"
+    // "list todo", "lihat todo", "todo list"
     if (lower.match(/^(list|lihat|cek|tampilkan)\s*(todo|tugas|daftar)/i) ||
         lower.match(/^(todo|tugas)\s*(list|daftar)/i) ||
         lower.match(/^(semua|seluruh)\s*(todo|tugas)/i)) {
-      // Trigger /list command
       const todos = queries.getTodosByChat.all(ctx.chat.id);
 
       if (todos.length === 0) {
@@ -699,9 +881,11 @@ function initBot() {
         const deadline = formatDate(new Date(todo.deadline));
         const status = todo.status === 'done' ? '✅' : (todo.reminded ? '🔔' : '⏳');
         const categoryEmoji = getCategoryEmoji(todo.category);
+        const priorityEmoji = getPriorityEmoji(todo.priority);
         const isOverdue = todo.status === 'pending' && new Date(todo.deadline) < new Date();
+        const recurringEmoji = todo.recurring ? '🔁' : '';
 
-        msg += `${i + 1}. ${status} ${categoryEmoji} *${todo.task}*${isOverdue ? ' ⚠️' : ''}\n`;
+        msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.task}*${isOverdue ? ' ⚠️' : ''} ${recurringEmoji}\n`;
         msg += `   📅 ${deadline}\n\n`;
       });
 
@@ -709,7 +893,7 @@ function initBot() {
       return ctx.reply(msg, { parse_mode: 'Markdown' });
     }
 
-    // "todo hari ini", "today", "apa aja hari ini"
+    // "todo hari ini", "today"
     if (lower.match(/^(todo|tugas)\s*(hari\s*ini|today)/i) ||
         lower.match(/^(hari\s*ini|today)\s*(apa|ada)/i) ||
         lower.match(/^(apa|ada)\s*(aja)?\s*(hari\s*ini|today)/i)) {
@@ -726,15 +910,16 @@ function initBot() {
         const minutes = String(deadline.getMinutes()).padStart(2, '0');
         const status = todo.status === 'done' ? '✅' : '⏳';
         const categoryEmoji = getCategoryEmoji(todo.category);
+        const priorityEmoji = getPriorityEmoji(todo.priority);
 
-        msg += `${i + 1}. ${status} ${categoryEmoji} *${todo.task}*\n`;
+        msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.task}*\n`;
         msg += `   ⏰ Jam ${hours}:${minutes}\n\n`;
       });
 
       return ctx.reply(msg, { parse_mode: 'Markdown' });
     }
 
-    // "todo besok", "tomorrow"
+    // "todo besok"
     if (lower.match(/^(todo|tugas)\s*besok/i) ||
         lower.match(/^besok\s*(apa|ada)/i)) {
       const todos = queries.getTomorrowTodos.all(ctx.chat.id);
@@ -750,10 +935,57 @@ function initBot() {
         const minutes = String(deadline.getMinutes()).padStart(2, '0');
         const status = todo.status === 'done' ? '✅' : '⏳';
         const categoryEmoji = getCategoryEmoji(todo.category);
+        const priorityEmoji = getPriorityEmoji(todo.priority);
 
-        msg += `${i + 1}. ${status} ${categoryEmoji} *${todo.task}*\n`;
+        msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.task}*\n`;
         msg += `   ⏰ Jam ${hours}:${minutes}\n\n`;
       });
+
+      return ctx.reply(msg, { parse_mode: 'Markdown' });
+    }
+
+    // "kalender", "calendar", "jadwal"
+    if (lower.match(/^(kalender|calendar|jadwal)/i)) {
+      const today = new Date();
+      const startOfWeek = new Date(today);
+      startOfWeek.setDate(today.getDate() - today.getDay() + 1);
+
+      const endOfWeek = new Date(startOfWeek);
+      endOfWeek.setDate(startOfWeek.getDate() + 6);
+
+      const todos = queries.getWeekTodos.all(ctx.chat.id, startOfWeek.toISOString().split('T')[0], endOfWeek.toISOString().split('T')[0]);
+
+      const days = ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min'];
+
+      let msg = `📅 *Kalender Minggu Ini*\n\n`;
+
+      for (let i = 0; i < 7; i++) {
+        const date = new Date(startOfWeek);
+        date.setDate(startOfWeek.getDate() + i);
+        const isToday = date.toDateString() === today.toDateString();
+
+        const dayTodos = todos.filter(t => {
+          const deadline = new Date(t.deadline);
+          return deadline.toDateString() === date.toDateString();
+        });
+
+        const dayLabel = isToday ? `*▸ ${days[i]} ${date.getDate()} ◂*` : `*${days[i]} ${date.getDate()}*`;
+
+        if (dayTodos.length === 0) {
+          msg += `📅 ${dayLabel}: -\n`;
+        } else {
+          msg += `📅 ${dayLabel}:\n`;
+          dayTodos.forEach(todo => {
+            const deadline = new Date(todo.deadline);
+            const hours = String(deadline.getHours()).padStart(2, '0');
+            const minutes = String(deadline.getMinutes()).padStart(2, '0');
+            const status = todo.status === 'done' ? '✅' : '⏳';
+            const priorityEmoji = getPriorityEmoji(todo.priority);
+
+            msg += `   ${status} ${priorityEmoji} ${todo.task} (${hours}:${minutes})\n`;
+          });
+        }
+      }
 
       return ctx.reply(msg, { parse_mode: 'Markdown' });
     }
@@ -777,6 +1009,11 @@ function initBot() {
         msg += `🚨 Overdue: *${stats.overdue}*\n`;
       }
 
+      msg += `\n*Prioritas:*\n`;
+      msg += `🔴 Urgent: *${stats.urgent || 0}*\n`;
+      msg += `🟡 Normal: *${stats.normal_priority || 0}*\n`;
+      msg += `🟢 Low: *${stats.low_priority || 0}*\n`;
+
       msg += `\n📈 Tingkat penyelesaian: *${completionRate}%*\n`;
 
       if (completionRate >= 80) {
@@ -790,7 +1027,7 @@ function initBot() {
       return ctx.reply(msg, { parse_mode: 'Markdown' });
     }
 
-    // "done 1", "selesai 1", "tandai selesai 1"
+    // "done 1", "selesai 1"
     const doneMatch = lower.match(/^(done|selesai|selesaikan|tandai)\s*(\d+)/i);
     if (doneMatch) {
       const index = parseInt(doneMatch[2]) - 1;
@@ -848,15 +1085,16 @@ function initBot() {
         const deadline = formatDate(new Date(todo.deadline));
         const status = todo.status === 'done' ? '✅' : '⏳';
         const categoryEmoji = getCategoryEmoji(todo.category);
+        const priorityEmoji = getPriorityEmoji(todo.priority);
 
-        msg += `${i + 1}. ${status} ${categoryEmoji} *${todo.task}*\n`;
+        msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.task}*\n`;
         msg += `   📅 ${deadline}\n\n`;
       });
 
       return ctx.reply(msg, { parse_mode: 'Markdown' });
     }
 
-    // "bantuan", "help", "gimana cara"
+    // "bantuan", "help"
     if (lower.match(/^(bantuan|help|gimana|cara|panduan)/i)) {
       return ctx.reply(
         `📖 *Command List*\n\n` +
@@ -869,11 +1107,13 @@ function initBot() {
         `/today — Hari ini\n` +
         `/tomorrow — Besok\n` +
         `/upcoming — 7 hari ke depan\n` +
+        `/calendar — Kalender mingguan\n` +
         `/search <keyword> — Cari todo\n` +
         `/stats — Statistik\n\n` +
         `*💡 Atau ketik langsung:*\n` +
         `• "list todo" — Lihat semua todo\n` +
         `• "todo hari ini" — Todo hari ini\n` +
+        `• "kalender" — Kalender mingguan\n` +
         `• "done 1" — Tandai selesai\n` +
         `• "hapus 1" — Hapus todo\n` +
         `• "cari meeting" — Cari todo\n` +
@@ -884,13 +1124,11 @@ function initBot() {
 
     // ==================== Auto-parse Reminder ====================
 
-    // Coba parse sebagai reminder (pakai hybrid)
     const result = await parseReminderHybrid(text);
 
     if (result.deadline) {
-      saveTodo(ctx, result.task, result.deadline, result.reminderTime, result.category, result.urgency);
+      saveTodo(ctx, result.task, result.deadline, result.reminderTime, result.category, result.urgency, result.recurring);
     } else {
-      // Beri saran yang helpful (coba LLM dulu)
       const llmHint = await generateHintWithLLM(text);
       const hints = generateHint(text);
 
@@ -907,6 +1145,7 @@ function initBot() {
       msg += `*Contoh input:*\n` +
         `• "Tugas A besok jam 3 sore"\n` +
         `• "Meeting client senin depan"\n` +
+        `• "Olahraga setiap senin jam 6 pagi"\n` +
         `• "list todo" — Lihat semua todo\n` +
         `• "help" — Bantuan`;
 
@@ -932,9 +1171,36 @@ function getCategoryEmoji(category) {
   return emojis[category] || '📋';
 }
 
+function getPriorityEmoji(priority) {
+  const emojis = {
+    urgent: '🔴',
+    normal: '🟡',
+    low: '🟢',
+  };
+  return emojis[priority] || '🟡';
+}
+
 function getDayName(date) {
   const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
   return days[date.getDay()];
+}
+
+function getNextRecurringDate(deadline, recurring) {
+  const next = new Date(deadline);
+
+  switch (recurring) {
+    case 'daily':
+      next.setDate(next.getDate() + 1);
+      break;
+    case 'weekly':
+      next.setDate(next.getDate() + 7);
+      break;
+    case 'monthly':
+      next.setMonth(next.getMonth() + 1);
+      break;
+  }
+
+  return next;
 }
 
 function getBot() {

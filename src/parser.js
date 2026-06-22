@@ -48,14 +48,27 @@ const urgentKeywords = [
   'kritis', 'wajib', 'gak bisa ditunda', 'tidak bisa ditunda',
 ];
 
+// Kata-kata untuk prioritas rendah
+const lowPriorityKeywords = [
+  'nanti aja', 'santai', 'gak buru-buru', 'low priority',
+  'kalau sempat', 'kapan aja', 'gak penting',
+];
+
 // Kata-kata untuk kategori
 const categoryPatterns = {
   kuliah: ['kuliah', 'kampus', 'tugas', 'skripsi', 'ujian', 'praktikum', 'makalah', 'seminar', 'sidang', 'kp', 'magang', 'lab', 'matkul', 'mata kuliah', 'dosen', 'asisten'],
   kerja: ['kerja', 'kantor', 'meeting', 'rapat', 'presentasi', 'client', 'proyek', 'deadline', 'laporan', 'seminar', 'workshop', 'training'],
   belanja: ['beli', 'belanja', 'belanja', 'beliin', 'beliin', 'toko', 'mall', 'pasar', 'grocery'],
-  kesehatan: ['obat', 'dokter', 'rumah sakit', 'rs', 'checkup', 'kontrol', 'vaksin', 'olahraga', 'gym', 'senam'],
+  kesehatan: ['obat', 'dokter', 'rumah sakit', 'rs', 'checkup', 'kontrol', 'vaksin', 'olahraga', 'gym', 'senam', 'mandi', 'bangun'],
   pribadi: ['jalan', 'nongkrong', 'ketemu', 'kumpul', 'acara', 'undangan', 'nikahan', 'sunatan', 'ulang tahun', 'wisuda'],
   keuangan: ['bayar', 'tagihan', 'cicilan', 'listrik', 'air', 'internet', 'pulsa', 'token', 'transfer', 'setor'],
+};
+
+// Kata-kata untuk recurring
+const recurringPatterns = {
+  daily: ['setiap hari', 'tiap hari', 'harian', 'setiap pagi', 'setiap malam', 'setiap siang'],
+  weekly: ['setiap minggu', 'tiap minggu', 'mingguan', 'setiap senin', 'setiap selasa', 'setiap rabu', 'setiap kamis', 'setiap jumat', 'setiap sabtu', 'setiap minggu'],
+  monthly: ['setiap bulan', 'tiap bulan', 'bulanan', 'setiap tanggal'],
 };
 
 // Stop words untuk task extraction
@@ -68,6 +81,7 @@ const stopWords = [
   'pagi', 'siang', 'sore', 'malam', 'subuh',
   'senin', 'selasa', 'rabu', 'kamis', 'jumat', 'sabtu', 'minggu',
   'jam', 'depan', 'lagi', 'yang', 'dan', 'atau',
+  'setiap', 'tiap', 'harian', 'mingguan', 'bulanan',
 ];
 
 // ==================== Helper Functions ====================
@@ -85,7 +99,13 @@ function detectUrgency(text) {
     }
   }
 
-  // Cek deadline yang sangat dekat (akan dihitung nanti di parseReminder)
+  // Cek keyword prioritas rendah
+  for (const keyword of lowPriorityKeywords) {
+    if (lower.includes(keyword)) {
+      return 'low';
+    }
+  }
+
   return 'normal';
 }
 
@@ -107,6 +127,36 @@ function detectCategory(text) {
 }
 
 /**
+ * Deteksi recurring pattern dari text
+ */
+function detectRecurring(text) {
+  const lower = text.toLowerCase();
+
+  // Cek pattern harian
+  for (const pattern of recurringPatterns.daily) {
+    if (lower.includes(pattern)) {
+      return 'daily';
+    }
+  }
+
+  // Cek pattern mingguan
+  for (const pattern of recurringPatterns.weekly) {
+    if (lower.includes(pattern)) {
+      return 'weekly';
+    }
+  }
+
+  // Cek pattern bulanan
+  for (const pattern of recurringPatterns.monthly) {
+    if (lower.includes(pattern)) {
+      return 'monthly';
+    }
+  }
+
+  return null;
+}
+
+/**
  * Ekstrak nama task dari pesan dengan konteks lebih baik
  */
 function extractTaskName(text) {
@@ -125,6 +175,13 @@ function extractTaskName(text) {
   // Buang kata urgency (bukan bagian dari task)
   for (const keyword of urgentKeywords) {
     cleaned = cleaned.replace(new RegExp(keyword, 'gi'), '');
+  }
+
+  // Buang kata recurring
+  for (const patterns of Object.values(recurringPatterns)) {
+    for (const pattern of patterns) {
+      cleaned = cleaned.replace(new RegExp(pattern, 'gi'), '');
+    }
   }
 
   // Buang stop words
@@ -160,16 +217,12 @@ function parseIndonesianDate(text) {
     target.setDate(target.getDate() + 1);
 
     // Cek apakah ada "hari X" yang disebut
-    // Jika besok adalah hari yang dimaksud, pakai besok
     for (const [hari, dayNum] of Object.entries(hariMap)) {
       if (text.includes(`hari ${hari}`) || text.includes(hari)) {
         const tomorrowDay = target.getDay();
         if (tomorrowDay === dayNum) {
-          // Besok memang hari yang dimaksud
           return target;
         }
-        // Jika besok bukan hari yang dimaksud, cek apakah "hari X" merujuk ke minggu depan
-        // Tapi karena user bilang "besok", prioritize besok
         return target;
       }
     }
@@ -305,13 +358,7 @@ function generateSmartResponse(task, deadline, category, urgency) {
 // ==================== Main Parser ====================
 
 /**
- * Parse pesan natural language jadi { task, deadline, reminderTime, category, urgency }
- *
- * Contoh input:
- * - "ingetin gw tugas A hari rabu"
- * - - "reminder: meeting client besok pagi"
- * - "beli susu 3 hari lagi"
- * - "presentasi senin depan jam 2 siang"
+ * Parse pesan natural language jadi { task, deadline, reminderTime, category, urgency, recurring }
  */
 function parseReminder(text) {
   const original = text;
@@ -322,6 +369,9 @@ function parseReminder(text) {
 
   // Deteksi kategori
   const category = detectCategory(text);
+
+  // Deteksi recurring
+  const recurring = detectRecurring(text);
 
   // Ambil waktu spesifik (jam berapa)
   let jamOverride = null;
@@ -351,14 +401,12 @@ function parseReminder(text) {
   // Ambil jam deadline
   const jamMatch = text.match(/jam\s*(\d{1,2})[:.]?(\d{2})?/g);
   if (jamMatch) {
-    // Ambil jam pertama yang bukan reminder jam
     for (const match of jamMatch) {
       const nums = match.match(/(\d{1,2})[:.]?(\d{2})?/);
       if (nums) {
         let h = parseInt(nums[1]);
         const m = nums[2] ? parseInt(nums[2]) : 0;
 
-        // Konversi ke 24-jam jika ada konteks siang/sore/malam
         if (h <= 12) {
           if (text.includes('sore') || text.includes('malam')) {
             h += 12;
@@ -368,7 +416,6 @@ function parseReminder(text) {
         }
 
         const jamStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-        // Jika ini bukan reminder jam, ini adalah deadline jam
         if (jamStr !== reminderJamOverride) {
           jamOverride = jamStr;
           break;
@@ -376,7 +423,6 @@ function parseReminder(text) {
       }
     }
 
-    // Jika tidak ada jam deadline terpisah, pakai jam pertama
     if (!jamOverride && jamMatch.length > 0) {
       const nums = jamMatch[0].match(/(\d{1,2})[:.]?(\d{2})?/);
       if (nums) {
@@ -405,7 +451,7 @@ function parseReminder(text) {
     }
   }
 
-  // Coba parse dengan chrono-node (support bahasa Inggris + beberapa Indonesia)
+  // Coba parse dengan chrono-node
   let parsedDate = chrono.parseDate(text, { forwardDate: true });
 
   // Kalau chrono gagal, coba manual parse untuk bahasa Indonesia
@@ -432,7 +478,7 @@ function parseReminder(text) {
 
   // Update urgency berdasarkan deadline
   if (parsedDate) {
-    const now = new Date();
+    const now = getNow();
     const diff = parsedDate - now;
     const hoursLeft = diff / (1000 * 60 * 60);
 
@@ -443,44 +489,36 @@ function parseReminder(text) {
     }
   }
 
-  // Ekstrak task name — hapus kata-kata yang bukan task
+  // Ekstrak task name
   let task = extractTaskName(text);
 
-  // Reminder time: 1 jam sebelum deadline (atau 1 hari sebelum untuk deadline pagi)
-  // ATAU pakai jam yang user tentukan
+  // Reminder time
   let reminderTime = null;
   if (parsedDate) {
     const now = getNow();
 
     if (reminderJamOverride) {
-      // User tentukan jam reminder sendiri
       reminderTime = new Date(parsedDate);
       const [rh, rm] = reminderJamOverride.split(':').map(Number);
       reminderTime.setHours(rh, rm, 0, 0);
 
-      // Jika reminder jam > deadline jam, reminder adalah hari sebelumnya
       if (reminderTime >= parsedDate) {
         reminderTime.setDate(reminderTime.getDate() - 1);
       }
     } else {
-      // Default logic
       reminderTime = new Date(parsedDate);
       if (parsedDate.getHours() <= 10) {
-        // Deadline pagi → reminder H-1 jam 8 malam
         reminderTime.setDate(reminderTime.getDate() - 1);
         reminderTime.setHours(20, 0, 0, 0);
       } else {
-        // Deadline siang/sore → reminder 1 jam sebelum
         reminderTime.setHours(reminderTime.getHours() - 1);
       }
     }
 
-    // Jika reminder time sudah lewat, set ke 1 menit dari sekarang (langsung kirim)
     if (reminderTime <= now) {
-      reminderTime = new Date(now.getTime() + 60 * 1000); // +1 menit
+      reminderTime = new Date(now.getTime() + 60 * 1000);
     }
 
-    // Jika deadline sudah lewat, beri tahu user
     if (parsedDate <= now) {
       urgency = 'overdue';
     }
@@ -492,6 +530,7 @@ function parseReminder(text) {
     reminderTime,
     category,
     urgency,
+    recurring,
     raw: original,
   };
 }
@@ -525,7 +564,6 @@ function generateHint(text) {
   const lower = text.toLowerCase();
   const hints = [];
 
-  // Cek apakah ada waktu
   const hasTime = lower.match(/jam\s*\d/) || lower.includes('pagi') || lower.includes('siang') ||
     lower.includes('sore') || lower.includes('malam') || lower.includes('besok') ||
     lower.includes('lusa') || lower.match(/\d+\s*hari/);
@@ -534,7 +572,6 @@ function generateHint(text) {
     hints.push('⏰ Kapan deadline-nya? Tambahkan waktu, contoh: "besok jam 3 sore"');
   }
 
-  // Cek apakah ada task yang jelas
   const task = extractTaskName(text);
   if (!task || task.length < 3) {
     hints.push('📋 Apa task-nya? Sebutkan dengan jelas, contoh: "Tugas A" atau "Meeting client"');
@@ -543,4 +580,4 @@ function generateHint(text) {
   return hints;
 }
 
-module.exports = { parseReminder, formatDate, generateHint, detectCategory, detectUrgency };
+module.exports = { parseReminder, formatDate, generateHint, detectCategory, detectUrgency, detectRecurring };

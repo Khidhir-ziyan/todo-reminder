@@ -48,6 +48,7 @@ Kembalikan HANYA JSON (tanpa markdown, tanpa penjelasan) dengan format:
   "reminder_time": "waktu REMINDER dalam format HH:MM (24 jam) atau null jika user sebut 'ingetin jam X'",
   "category": "kuliah|kerja|belanja|kesehatan|pribadi|keuangan|general",
   "urgency": "urgent|normal|low",
+  "recurring": "daily|weekly|monthly|null",
   "confidence": 0.0-1.0
 }
 
@@ -69,9 +70,16 @@ Aturan PENTING:
 8. "subuh" = 05:00, "pagi" = 09:00, "siang" = 13:00, "sore" = 16:00, "malam" = 20:00
 9. Jika ada "jam X" spesifik, gunakan itu sebagai time (DEADLINE), BUKAN reminder_time
 10. reminder_time HANYA jika user secara eksplisit bilang "ingetin jam X" atau "reminder jam X"
-11. Deteksi urgency dari kata kunci: urgent, segera, penting, deadline, dll
-12. Kategori berdasarkan konteks: tugas/kuliah = kuliah, meeting/rapat = kerja, olahraga/mandi/bangun = kesehatan, dll
-13. Jika benar-benar tidak bisa diparse, confidence = 0
+
+11. RECURRING DETECTION:
+    - "setiap hari", "tiap hari", "harian" → recurring: "daily"
+    - "setiap minggu", "tiap minggu", "mingguan", "setiap senin/selasa/rabu/..." → recurring: "weekly"
+    - "setiap bulan", "tiap bulan", "bulanan" → recurring: "monthly"
+    - Jika tidak ada kata recurring → recurring: null
+
+12. Deteksi urgency dari kata kunci: urgent, segera, penting, deadline, dll
+13. Kategori berdasarkan konteks: tugas/kuliah = kuliah, meeting/rapat = kerja, olahraga/mandi/bangun = kesehatan, dll
+14. Jika benar-benar tidak bisa diparse, confidence = 0
 
 Hari ini: ${todayStr} (${todayDay})
 Waktu sekarang: ${String(jakartaNow.getHours()).padStart(2,'0')}:${String(jakartaNow.getMinutes()).padStart(2,'0')}`;
@@ -112,6 +120,20 @@ Waktu sekarang: ${String(jakartaNow.getHours()).padStart(2,'0')}:${String(jakart
           h += 12;
         }
         parsed.reminder_time = `${String(h).padStart(2, '0')}:00`;
+      }
+    }
+
+    // Deteksi recurring jika belum terdeteksi
+    if (!parsed.recurring) {
+      const lower = text.toLowerCase();
+      if (lower.includes('setiap hari') || lower.includes('tiap hari') || lower.includes('harian')) {
+        parsed.recurring = 'daily';
+      } else if (lower.includes('setiap minggu') || lower.includes('tiap minggu') || lower.includes('mingguan')) {
+        parsed.recurring = 'weekly';
+      } else if (lower.match(/setiap\s+(senin|selasa|rabu|kamis|jumat|sabtu|minggu)/i)) {
+        parsed.recurring = 'weekly';
+      } else if (lower.includes('setiap bulan') || lower.includes('tiap bulan') || lower.includes('bulanan')) {
+        parsed.recurring = 'monthly';
       }
     }
 
