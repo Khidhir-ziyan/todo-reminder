@@ -2,6 +2,7 @@ require('dotenv').config();
 const { initBot } = require('./bot');
 const { initEmail } = require('./email');
 const { startScheduler } = require('./scheduler');
+const { initLLM } = require('./llm');
 
 // Validasi environment variables
 const requiredEnv = ['TELEGRAM_BOT_TOKEN', 'SMTP_EMAIL', 'SMTP_PASSWORD', 'REMINDER_EMAIL'];
@@ -12,6 +13,8 @@ for (const envVar of requiredEnv) {
   }
 }
 
+// Optional: MISTRAL_API_KEY (LLM features)
+
 // ==================== Start Application ====================
 async function main() {
   console.log('🤖 Starting Todo Reminder Bot...');
@@ -20,6 +23,10 @@ async function main() {
   // 1. Initialize email
   console.log('\n📧 Initializing email...');
   initEmail();
+
+  // 1.5 Initialize LLM (optional)
+  console.log('\n🧠 Initializing LLM...');
+  initLLM();
 
   // 2. Initialize bot
   console.log('\n🤖 Initializing bot...');

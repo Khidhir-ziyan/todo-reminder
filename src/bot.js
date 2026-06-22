@@ -2,6 +2,7 @@ const { Telegraf } = require('telegraf');
 const { parseReminder, formatDate, generateHint, detectCategory, detectUrgency } = require('./parser');
 const { queries } = require('./db');
 const { sendReminder } = require('./email');
+const { parseWithLLM, generateResponse, generateHintWithLLM } = require('./llm');
 const path = require('path');
 const fs = require('fs');
 const speech = require('@google-cloud/speech');
@@ -18,6 +19,44 @@ let defaultEmail = process.env.REMINDER_EMAIL;
 const userEmails = new Map();
 
 const TEMP_DIR = path.join(__dirname, '..', 'temp');
+
+// ==================== Hybrid Parser (LLM + Regex) ====================
+
+async function parseReminderHybrid(text) {
+  // Coba LLM dulu
+  const llmResult = await parseWithLLM(text);
+
+  if (llmResult && llmResult.confidence >= 0.5) {
+    // LLM berhasil parse dengan confidence tinggi
+    const deadline = new Date(`${llmResult.date}T${llmResult.time || '09:00'}:00`);
+
+    // Validasi tanggal
+    if (!isNaN(deadline.getTime())) {
+      // Hitung reminder time (1 jam sebelum, atau H-1 jam 8 malam untuk deadline pagi)
+      let reminderTime = new Date(deadline);
+      if (deadline.getHours() <= 10) {
+        reminderTime.setDate(reminderTime.getDate() - 1);
+        reminderTime.setHours(20, 0, 0, 0);
+      } else {
+        reminderTime.setHours(reminderTime.getHours() - 1);
+      }
+
+      return {
+        task: llmResult.task,
+        deadline: deadline,
+        reminderTime: reminderTime,
+        category: llmResult.category || 'general',
+        urgency: llmResult.urgency || 'normal',
+        raw: text,
+        source: 'llm',
+      };
+    }
+  }
+
+  // Fallback ke regex parser
+  const regexResult = parseReminder(text);
+  return { ...regexResult, source: 'regex' };
+}
 
 // ==================== Voice Processing ====================
 
@@ -271,7 +310,7 @@ function initBot() {
   });
 
   // /remind
-  bot.command('remind', (ctx) => {
+  bot.command('remind', async (ctx) => {
     const text = ctx.message.text;
     const taskText = text.replace(/^\/remind\s*/i, '').trim();
 
@@ -285,13 +324,17 @@ function initBot() {
       );
     }
 
-    const result = parseReminder(taskText);
+    const result = await parseReminderHybrid(taskText);
 
     if (!result.deadline) {
-      // Beri hint yang helpful
+      // Beri hint yang helpful (coba LLM dulu)
+      const llmHint = await generateHintWithLLM(taskText);
       const hints = generateHint(taskText);
+
       let msg = `❌ Gw gak ngerti waktu-nya 😅\n\n`;
-      if (hints.length > 0) {
+      if (llmHint) {
+        msg += `💡 *${llmHint}*\n\n`;
+      } else if (hints.length > 0) {
         msg += `*Saran:*\n`;
         hints.forEach(h => { msg += `• ${h}\n`; });
         msg += '\n';
@@ -572,15 +615,19 @@ function initBot() {
         return ctx.reply('❌ Gagal transcribe voice note. Coba lagi ya.');
       }
 
-      // Parse todo dari text
-      const result = parseReminder(transcription);
+      // Parse todo dari text (pakai hybrid)
+      const result = await parseReminderHybrid(transcription);
 
       if (!result.deadline) {
-        // Beri hint
+        // Beri hint (coba LLM dulu)
+        const llmHint = await generateHintWithLLM(transcription);
         const hints = generateHint(transcription);
+
         let msg = `📝 *Hasil Transcribe:*\n"${transcription}"\n\n`;
         msg += `❌ Waktu tidak dikenali.\n\n`;
-        if (hints.length > 0) {
+        if (llmHint) {
+          msg += `💡 *${llmHint}*\n`;
+        } else if (hints.length > 0) {
           msg += `*Saran:*\n`;
           hints.forEach(h => { msg += `• ${h}\n`; });
         }
@@ -606,23 +653,27 @@ function initBot() {
 
   // ==================== Auto-parse Text Messages ====================
 
-  bot.on('text', (ctx) => {
+  bot.on('text', async (ctx) => {
     const text = ctx.message.text;
 
     // Skip commands
     if (text.startsWith('/')) return;
 
-    // Coba parse sebagai reminder
-    const result = parseReminder(text);
+    // Coba parse sebagai reminder (pakai hybrid)
+    const result = await parseReminderHybrid(text);
 
     if (result.deadline) {
       saveTodo(ctx, result.task, result.deadline, result.reminderTime, result.category, result.urgency);
     } else {
-      // Beri saran yang helpful
+      // Beri saran yang helpful (coba LLM dulu)
+      const llmHint = await generateHintWithLLM(text);
       const hints = generateHint(text);
+
       let msg = `🤔 Gw gak ngerti 😅\n\n`;
 
-      if (hints.length > 0) {
+      if (llmHint) {
+        msg += `💡 *${llmHint}*\n\n`;
+      } else if (hints.length > 0) {
         msg += `*Mungkin maksud kamu:*\n`;
         hints.forEach(h => { msg += `• ${h}\n`; });
         msg += '\n';
