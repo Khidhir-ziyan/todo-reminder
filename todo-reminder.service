@@ -1,0 +1,15 @@
+[Unit]
+Description=Todo Reminder Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/todo-reminder
+ExecStart=/usr/bin/node src/index.js
+Restart=on-failure
+RestartSec=10
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

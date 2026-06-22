@@ -1,0 +1,16 @@
+services:
+  todo-reminder:
+    build: .
+    container_name: todo-reminder
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - SMTP_EMAIL=${SMTP_EMAIL}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - REMINDER_EMAIL=${REMINDER_EMAIL}
+      - TZ=Asia/Jakarta
+    volumes:
+      - todo-data:/app/data
+
+volumes:
+  todo-data:

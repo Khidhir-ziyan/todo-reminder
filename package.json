@@ -1,0 +1,22 @@
+{
+  "name": "todo-reminder",
+  "version": "1.0.0",
+  "description": "Telegram bot todo reminder with voice input and email notifications",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@google-cloud/speech": "^7.4.0",
+    "better-sqlite3": "^11.0.0",
+    "chrono-node": "^2.7.7",
+    "dotenv": "^16.4.5",
+    "fluent-ffmpeg": "^2.1.3",
+    "google-tts-api": "^2.0.2",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.14",
+    "telegraf": "^4.16.3"
+  }
+}
