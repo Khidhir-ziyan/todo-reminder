@@ -1,5 +1,27 @@
 const chrono = require('chrono-node');
 
+// ==================== Timezone Helper ====================
+const TIMEZONE = 'Asia/Jakarta';
+
+function getNow() {
+  return new Date();
+}
+
+function getToday() {
+  const now = new Date();
+  // Konversi ke Jakarta time
+  const jakartaOffset = 7 * 60; // UTC+7 dalam menit
+  const localOffset = now.getTimezoneOffset();
+  const diff = jakartaOffset + localOffset;
+  const jakartaNow = new Date(now.getTime() + diff * 60 * 1000);
+  return new Date(jakartaNow.getFullYear(), jakartaNow.getMonth(), jakartaNow.getDate());
+}
+
+function getDayName(date) {
+  const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+  return days[date.getDay()];
+}
+
 // ==================== Mappings ====================
 
 // Mapping hari Indonesia ke angka (0=Min, 1=Sen, ..., 6=Sab)
@@ -129,12 +151,14 @@ function extractTaskName(text) {
  * Parse tanggal bahasa Indonesia manual
  */
 function parseIndonesianDate(text) {
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const today = getToday();
+  const now = getNow();
 
   // "hari X" → cari hari berikutnya
+  // Cek dulu apakah ada "hari X" yang eksplisit
   for (const [hari, dayNum] of Object.entries(hariMap)) {
-    if (text.includes(`hari ${hari}`) || text.includes(hari)) {
+    // Pattern: "hari senin", "hari selasa", dll (harus ada "hari" sebelumnya)
+    if (text.includes(`hari ${hari}`)) {
       const target = new Date(today);
       const currentDay = target.getDay();
       let daysUntil = dayNum - currentDay;
@@ -144,8 +168,20 @@ function parseIndonesianDate(text) {
     }
   }
 
-  // "besok"
-  if (text.includes('besok')) {
+  // Cek pattern tanpa "hari" tapi dengan konteks jelas: "senin depan", "selasa besok", dll
+  for (const [hari, dayNum] of Object.entries(hariMap)) {
+    if (text.includes(`${hari} depan`) || text.includes(`${hari} besok`)) {
+      const target = new Date(today);
+      const currentDay = target.getDay();
+      let daysUntil = dayNum - currentDay;
+      if (daysUntil <= 0) daysUntil += 7;
+      target.setDate(target.getDate() + daysUntil);
+      return target;
+    }
+  }
+
+  // "besok" (pastikan bukan bagian dari "selasa besok" yang udah di-handle di atas)
+  if (text.includes('besok') && !text.match(/(senin|selasa|rabu|kamis|jumat|sabtu|minggu)\s*besok/)) {
     const target = new Date(today);
     target.setDate(target.getDate() + 1);
     return target;
@@ -345,6 +381,8 @@ function parseReminder(text) {
   // Reminder time: 1 jam sebelum deadline (atau 1 hari sebelum untuk deadline pagi)
   let reminderTime = null;
   if (parsedDate) {
+    const now = getNow();
+
     reminderTime = new Date(parsedDate);
     if (parsedDate.getHours() <= 10) {
       // Deadline pagi → reminder H-1 jam 8 malam
@@ -353,6 +391,16 @@ function parseReminder(text) {
     } else {
       // Deadline siang/sore → reminder 1 jam sebelum
       reminderTime.setHours(reminderTime.getHours() - 1);
+    }
+
+    // Jika reminder time sudah lewat, set ke 1 menit dari sekarang (langsung kirim)
+    if (reminderTime <= now) {
+      reminderTime = new Date(now.getTime() + 60 * 1000); // +1 menit
+    }
+
+    // Jika deadline sudah lewat, beri tahu user
+    if (parsedDate <= now) {
+      urgency = 'overdue';
     }
   }
 
