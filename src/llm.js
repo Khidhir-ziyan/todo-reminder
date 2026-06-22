@@ -1,4 +1,4 @@
-const MistralClient = require('@mistralai/mistralai');
+const { Mistral } = require('@mistralai/mistralai');
 
 let client = null;
 
@@ -9,7 +9,7 @@ function initLLM() {
     return false;
   }
 
-  client = new MistralClient(apiKey);
+  client = new Mistral({ apiKey: apiKey });
   console.log('✅ Mistral AI initialized');
   return true;
 }
@@ -42,7 +42,7 @@ Pesan: "${text}"
 
 Kembalikan HANYA JSON (tanpa markdown, tanpa penjelasan) dengan format:
 {
-  "task": "nama task yang jelas",
+  "task": "nama task yang SUDAH DIPERBAIKI typo-nya dan jelas",
   "date": "tanggal dalam format YYYY-MM-DD atau null jika tidak ada",
   "time": "waktu deadline dalam format HH:MM (24 jam) atau null jika tidak ada",
   "reminder_time": "waktu reminder dalam format HH:MM (24 jam) atau null jika user sebut 'ingetin jam X'",
@@ -52,21 +52,22 @@ Kembalikan HANYA JSON (tanpa markdown, tanpa penjelasan) dengan format:
 }
 
 Aturan PENTING:
-1. "besok"/"bsk" = hari ini + 1 hari (bukan hari ini!)
-2. "lusa" = hari ini + 2 hari
-3. Jika ada "besok" + "hari X", gunakan BESOK (bukan hari X berikutnya)
-4. Jika ada "X hari/minggu/bulan lagi", hitung dari hari ini
-5. Konversi waktu ke 24 jam: "jam 9 pagi" = 09:00, "jam 2 siang" = 14:00, "jam 9 malam" = 21:00
-6. "subuh" = 05:00, "pagi" = 09:00, "siang" = 13:00, "sore" = 16:00, "malam" = 20:00
-7. Jika user bilang "ingetin jam X" atau "reminder jam X", set reminder_time ke jam tersebut
-8. Deteksi urgency dari kata kunci: urgent, segera, penting, deadline, dll
-9. Kategori berdasarkan konteks: tugas/kuliah = kuliah, meeting/rapat = kerja, bangun/subuh/mandi = kesehatan, dll
-10. Jika benar-benar tidak bisa diparse, confidence = 0
+1. PERBAIKI TYPO! Contoh: "engitein" → "ingetin", "bsk" → "besok", "tgas" → "tugas"
+2. "besok"/"bsk" = hari ini + 1 hari (bukan hari ini!)
+3. "lusa" = hari ini + 2 hari
+4. Jika ada "besok" + "hari X", gunakan BESOK (bukan hari X berikutnya)
+5. Jika ada "X hari/minggu/bulan lagi", hitung dari hari ini
+6. Konversi waktu ke 24 jam: "jam 9 pagi" = 09:00, "jam 2 siang" = 14:00, "jam 9 malam" = 21:00
+7. "subuh" = 05:00, "pagi" = 09:00, "siang" = 13:00, "sore" = 16:00, "malam" = 20:00
+8. Jika user bilang "ingetin jam X" atau "reminder jam X", set reminder_time ke jam tersebut
+9. Deteksi urgency dari kata kunci: urgent, segera, penting, deadline, dll
+10. Kategori berdasarkan konteks: tugas/kuliah = kuliah, meeting/rapat = kerja, bangun/subuh/mandi = kesehatan, dll
+11. Jika benar-benar tidak bisa diparse, confidence = 0
 
 Hari ini: ${todayStr} (${todayDay})
 Waktu sekarang: ${String(jakartaNow.getHours()).padStart(2,'0')}:${String(jakartaNow.getMinutes()).padStart(2,'0')}`;
 
-    const response = await client.chat({
+    const response = await client.chat.complete({
       model: 'mistral-tiny',
       messages: [
         { role: 'user', content: prompt }
@@ -137,7 +138,7 @@ Buat response yang:
 
 HANYA response, tanpa penjelasan.`;
 
-    const response = await client.chat({
+    const response = await client.chat.complete({
       model: 'mistral-tiny',
       messages: [
         { role: 'user', content: prompt }
@@ -170,7 +171,7 @@ Beri saran singkat (1-2 baris) dalam bahasa Indonesia casual tentang bagaimana c
 
 HANYA saran, tanpa penjelasan.`;
 
-    const response = await client.chat({
+    const response = await client.chat.complete({
       model: 'mistral-tiny',
       messages: [
         { role: 'user', content: prompt }
