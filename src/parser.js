@@ -154,23 +154,32 @@ function parseIndonesianDate(text) {
   const today = getToday();
   const now = getNow();
 
-  // "hari X" → cari hari berikutnya
-  // Cek dulu apakah ada "hari X" yang eksplisit
-  for (const [hari, dayNum] of Object.entries(hariMap)) {
-    // Pattern: "hari senin", "hari selasa", dll (harus ada "hari" sebelumnya)
-    if (text.includes(`hari ${hari}`)) {
-      const target = new Date(today);
-      const currentDay = target.getDay();
-      let daysUntil = dayNum - currentDay;
-      if (daysUntil <= 0) daysUntil += 7; // Kalau hari ini, ambil minggu depan
-      target.setDate(target.getDate() + daysUntil);
-      return target;
+  // "besok" → hari ini + 1 (PRIORITAS TERTINGGI)
+  if (text.includes('besok') || text.includes('bsk')) {
+    const target = new Date(today);
+    target.setDate(target.getDate() + 1);
+
+    // Cek apakah ada "hari X" yang disebut
+    // Jika besok adalah hari yang dimaksud, pakai besok
+    for (const [hari, dayNum] of Object.entries(hariMap)) {
+      if (text.includes(`hari ${hari}`) || text.includes(hari)) {
+        const tomorrowDay = target.getDay();
+        if (tomorrowDay === dayNum) {
+          // Besok memang hari yang dimaksud
+          return target;
+        }
+        // Jika besok bukan hari yang dimaksud, cek apakah "hari X" merujuk ke minggu depan
+        // Tapi karena user bilang "besok", prioritize besok
+        return target;
+      }
     }
+
+    return target;
   }
 
-  // Cek pattern tanpa "hari" tapi dengan konteks jelas: "senin depan", "selasa besok", dll
+  // "hari X" → cari hari berikutnya (HANYA jika tidak ada "besok")
   for (const [hari, dayNum] of Object.entries(hariMap)) {
-    if (text.includes(`${hari} depan`) || text.includes(`${hari} besok`)) {
+    if (text.includes(`hari ${hari}`)) {
       const target = new Date(today);
       const currentDay = target.getDay();
       let daysUntil = dayNum - currentDay;
@@ -180,11 +189,16 @@ function parseIndonesianDate(text) {
     }
   }
 
-  // "besok" (pastikan bukan bagian dari "selasa besok" yang udah di-handle di atas)
-  if (text.includes('besok') && !text.match(/(senin|selasa|rabu|kamis|jumat|sabtu|minggu)\s*besok/)) {
-    const target = new Date(today);
-    target.setDate(target.getDate() + 1);
-    return target;
+  // "senin depan", "selasa besok", dll
+  for (const [hari, dayNum] of Object.entries(hariMap)) {
+    if (text.includes(`${hari} depan`) || text.includes(`${hari} besok`)) {
+      const target = new Date(today);
+      const currentDay = target.getDay();
+      let daysUntil = dayNum - currentDay;
+      if (daysUntil <= 0) daysUntil += 7;
+      target.setDate(target.getDate() + daysUntil);
+      return target;
+    }
   }
 
   // "lusa"
@@ -311,21 +325,75 @@ function parseReminder(text) {
 
   // Ambil waktu spesifik (jam berapa)
   let jamOverride = null;
-  const jamMatch = text.match(/jam\s*(\d{1,2})[:.]?(\d{2})?/);
-  if (jamMatch) {
-    let h = parseInt(jamMatch[1]);
-    const m = jamMatch[2] ? parseInt(jamMatch[2]) : 0;
+  let reminderJamOverride = null;
 
-    // Konversi ke 24-jam jika ada konteks siang/sore/malam
+  // Cek apakah ada "ingetin nya jam X" atau "reminder jam X"
+  const reminderJamMatch = text.match(/ingetin\s*(nya)?\s*jam\s*(\d{1,2})[:.]?(\d{2})?/i) ||
+                           text.match(/reminder\s*jam\s*(\d{1,2})[:.]?(\d{2})?/i);
+  if (reminderJamMatch) {
+    let h = parseInt(reminderJamMatch[2] || reminderJamMatch[1]);
+    const m = reminderJamMatch[3] ? parseInt(reminderJamMatch[3]) : 0;
+
+    // Konversi ke 24-jam
     if (h <= 12) {
       if (text.includes('sore') || text.includes('malam')) {
         h += 12;
+      } else if (text.includes('pagi') || text.includes('subuh')) {
+        // Tetap AM
       } else if (text.includes('siang') && h < 12) {
         h += 12;
       }
     }
 
-    jamOverride = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    reminderJamOverride = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  }
+
+  // Ambil jam deadline
+  const jamMatch = text.match(/jam\s*(\d{1,2})[:.]?(\d{2})?/g);
+  if (jamMatch) {
+    // Ambil jam pertama yang bukan reminder jam
+    for (const match of jamMatch) {
+      const nums = match.match(/(\d{1,2})[:.]?(\d{2})?/);
+      if (nums) {
+        let h = parseInt(nums[1]);
+        const m = nums[2] ? parseInt(nums[2]) : 0;
+
+        // Konversi ke 24-jam jika ada konteks siang/sore/malam
+        if (h <= 12) {
+          if (text.includes('sore') || text.includes('malam')) {
+            h += 12;
+          } else if (text.includes('siang') && h < 12) {
+            h += 12;
+          }
+        }
+
+        const jamStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+        // Jika ini bukan reminder jam, ini adalah deadline jam
+        if (jamStr !== reminderJamOverride) {
+          jamOverride = jamStr;
+          break;
+        }
+      }
+    }
+
+    // Jika tidak ada jam deadline terpisah, pakai jam pertama
+    if (!jamOverride && jamMatch.length > 0) {
+      const nums = jamMatch[0].match(/(\d{1,2})[:.]?(\d{2})?/);
+      if (nums) {
+        let h = parseInt(nums[1]);
+        const m = nums[2] ? parseInt(nums[2]) : 0;
+
+        if (h <= 12) {
+          if (text.includes('sore') || text.includes('malam')) {
+            h += 12;
+          } else if (text.includes('siang') && h < 12) {
+            h += 12;
+          }
+        }
+
+        jamOverride = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+      }
+    }
   }
 
   // Deteksi waktu default (pagi/siang/sore/malam)
@@ -379,18 +447,32 @@ function parseReminder(text) {
   let task = extractTaskName(text);
 
   // Reminder time: 1 jam sebelum deadline (atau 1 hari sebelum untuk deadline pagi)
+  // ATAU pakai jam yang user tentukan
   let reminderTime = null;
   if (parsedDate) {
     const now = getNow();
 
-    reminderTime = new Date(parsedDate);
-    if (parsedDate.getHours() <= 10) {
-      // Deadline pagi → reminder H-1 jam 8 malam
-      reminderTime.setDate(reminderTime.getDate() - 1);
-      reminderTime.setHours(20, 0, 0, 0);
+    if (reminderJamOverride) {
+      // User tentukan jam reminder sendiri
+      reminderTime = new Date(parsedDate);
+      const [rh, rm] = reminderJamOverride.split(':').map(Number);
+      reminderTime.setHours(rh, rm, 0, 0);
+
+      // Jika reminder jam > deadline jam, reminder adalah hari sebelumnya
+      if (reminderTime >= parsedDate) {
+        reminderTime.setDate(reminderTime.getDate() - 1);
+      }
     } else {
-      // Deadline siang/sore → reminder 1 jam sebelum
-      reminderTime.setHours(reminderTime.getHours() - 1);
+      // Default logic
+      reminderTime = new Date(parsedDate);
+      if (parsedDate.getHours() <= 10) {
+        // Deadline pagi → reminder H-1 jam 8 malam
+        reminderTime.setDate(reminderTime.getDate() - 1);
+        reminderTime.setHours(20, 0, 0, 0);
+      } else {
+        // Deadline siang/sore → reminder 1 jam sebelum
+        reminderTime.setHours(reminderTime.getHours() - 1);
+      }
     }
 
     // Jika reminder time sudah lewat, set ke 1 menit dari sekarang (langsung kirim)

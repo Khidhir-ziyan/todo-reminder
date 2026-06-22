@@ -32,13 +32,34 @@ async function parseReminderHybrid(text) {
 
     // Validasi tanggal
     if (!isNaN(deadline.getTime())) {
-      // Hitung reminder time (1 jam sebelum, atau H-1 jam 8 malam untuk deadline pagi)
-      let reminderTime = new Date(deadline);
-      if (deadline.getHours() <= 10) {
-        reminderTime.setDate(reminderTime.getDate() - 1);
-        reminderTime.setHours(20, 0, 0, 0);
+      // Hitung reminder time
+      let reminderTime;
+      const now = new Date();
+
+      if (llmResult.reminder_time) {
+        // User tentukan jam reminder sendiri
+        reminderTime = new Date(deadline);
+        const [rh, rm] = llmResult.reminder_time.split(':').map(Number);
+        reminderTime.setHours(rh, rm, 0, 0);
+
+        // Jika reminder jam > deadline jam, reminder adalah hari sebelumnya
+        if (reminderTime >= deadline) {
+          reminderTime.setDate(reminderTime.getDate() - 1);
+        }
       } else {
-        reminderTime.setHours(reminderTime.getHours() - 1);
+        // Default logic
+        reminderTime = new Date(deadline);
+        if (deadline.getHours() <= 10) {
+          reminderTime.setDate(reminderTime.getDate() - 1);
+          reminderTime.setHours(20, 0, 0, 0);
+        } else {
+          reminderTime.setHours(reminderTime.getHours() - 1);
+        }
+      }
+
+      // Jika reminder time sudah lewat, set ke 1 menit dari sekarang
+      if (reminderTime <= now) {
+        reminderTime = new Date(now.getTime() + 60 * 1000);
       }
 
       return {

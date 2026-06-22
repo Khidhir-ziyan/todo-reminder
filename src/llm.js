@@ -44,22 +44,23 @@ Kembalikan HANYA JSON (tanpa markdown, tanpa penjelasan) dengan format:
 {
   "task": "nama task yang jelas",
   "date": "tanggal dalam format YYYY-MM-DD atau null jika tidak ada",
-  "time": "waktu dalam format HH:MM (24 jam) atau null jika tidak ada",
+  "time": "waktu deadline dalam format HH:MM (24 jam) atau null jika tidak ada",
+  "reminder_time": "waktu reminder dalam format HH:MM (24 jam) atau null jika user sebut 'ingetin jam X'",
   "category": "kuliah|kerja|belanja|kesehatan|pribadi|keuangan|general",
   "urgency": "urgent|normal|low",
   "confidence": 0.0-1.0
 }
 
 Aturan PENTING:
-1. "besok" = hari ini + 1 hari (bukan hari ini!)
+1. "besok"/"bsk" = hari ini + 1 hari (bukan hari ini!)
 2. "lusa" = hari ini + 2 hari
-3. Jika ada "hari X" (senin-minggu), hitung tanggal ke hari tersebut BERIKUTNYA dari hari ini
+3. Jika ada "besok" + "hari X", gunakan BESOK (bukan hari X berikutnya)
 4. Jika ada "X hari/minggu/bulan lagi", hitung dari hari ini
 5. Konversi waktu ke 24 jam: "jam 9 pagi" = 09:00, "jam 2 siang" = 14:00, "jam 9 malam" = 21:00
 6. "subuh" = 05:00, "pagi" = 09:00, "siang" = 13:00, "sore" = 16:00, "malam" = 20:00
-7. Jika tidak ada waktu spesifik tapi ada "pagi/siang/sore/malam", gunakan waktu default di atas
+7. Jika user bilang "ingetin jam X" atau "reminder jam X", set reminder_time ke jam tersebut
 8. Deteksi urgency dari kata kunci: urgent, segera, penting, deadline, dll
-9. Kategori berdasarkan konteks: tugas/kuliah = kuliah, meeting/rapat = kerja, bangun/subuh = kesehatan, dll
+9. Kategori berdasarkan konteks: tugas/kuliah = kuliah, meeting/rapat = kerja, bangun/subuh/mandi = kesehatan, dll
 10. Jika benar-benar tidak bisa diparse, confidence = 0
 
 Hari ini: ${todayStr} (${todayDay})
@@ -88,6 +89,20 @@ Waktu sekarang: ${String(jakartaNow.getHours()).padStart(2,'0')}:${String(jakart
     // Validate required fields
     if (!parsed.task || parsed.confidence < 0.3) {
       return null;
+    }
+
+    // Pastikan reminder_time ada jika user sebut "ingetin jam X"
+    if (!parsed.reminder_time) {
+      const reminderMatch = text.match(/ingetin\s*(nya)?\s*jam\s*(\d{1,2})/i);
+      if (reminderMatch) {
+        let h = parseInt(reminderMatch[2]);
+        if (h <= 12 && (text.includes('pagi') || text.includes('subuh'))) {
+          // Tetap AM
+        } else if (h <= 12 && (text.includes('sore') || text.includes('malam'))) {
+          h += 12;
+        }
+        parsed.reminder_time = `${String(h).padStart(2, '0')}:00`;
+      }
     }
 
     return parsed;
