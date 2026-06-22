@@ -44,8 +44,8 @@ Kembalikan HANYA JSON (tanpa markdown, tanpa penjelasan) dengan format:
 {
   "task": "nama task yang SUDAH DIPERBAIKI typo-nya dan jelas",
   "date": "tanggal dalam format YYYY-MM-DD atau null jika tidak ada",
-  "time": "waktu deadline dalam format HH:MM (24 jam) atau null jika tidak ada",
-  "reminder_time": "waktu reminder dalam format HH:MM (24 jam) atau null jika user sebut 'ingetin jam X'",
+  "time": "waktu DEADLINE dalam format HH:MM (24 jam) atau null jika tidak ada",
+  "reminder_time": "waktu REMINDER dalam format HH:MM (24 jam) atau null jika user sebut 'ingetin jam X'",
   "category": "kuliah|kerja|belanja|kesehatan|pribadi|keuangan|general",
   "urgency": "urgent|normal|low",
   "confidence": 0.0-1.0
@@ -57,12 +57,21 @@ Aturan PENTING:
 3. "lusa" = hari ini + 2 hari
 4. Jika ada "besok" + "hari X", gunakan BESOK (bukan hari X berikutnya)
 5. Jika ada "X hari/minggu/bulan lagi", hitung dari hari ini
-6. Konversi waktu ke 24 jam: "jam 9 pagi" = 09:00, "jam 2 siang" = 14:00, "jam 9 malam" = 21:00
-7. "subuh" = 05:00, "pagi" = 09:00, "siang" = 13:00, "sore" = 16:00, "malam" = 20:00
-8. Jika user bilang "ingetin jam X" atau "reminder jam X", set reminder_time ke jam tersebut
-9. Deteksi urgency dari kata kunci: urgent, segera, penting, deadline, dll
-10. Kategori berdasarkan konteks: tugas/kuliah = kuliah, meeting/rapat = kerja, bangun/subuh/mandi = kesehatan, dll
-11. Jika benar-benar tidak bisa diparse, confidence = 0
+
+6. PERBEDAAN TIME vs REMINDER_TIME:
+   - "jam X" yang berdiri sendiri = DEADLINE time (time)
+   - "ingetin jam X" atau "reminder jam X" = REMINDER time (reminder_time)
+   - Contoh: "olahraga jam 6 pagi" → time: "06:00" (DEADLINE)
+   - Contoh: "olahraga jam 6 pagi, ingetin jam 5" → time: "06:00", reminder_time: "05:00"
+   - Contoh: "ingetin saya olahraga jam 6 pagi" → time: "06:00" (DEADLINE, karena "jam 6 pagi" adalah waktu kejadian)
+
+7. Konversi waktu ke 24 jam: "jam 9 pagi" = 09:00, "jam 2 siang" = 14:00, "jam 9 malam" = 21:00
+8. "subuh" = 05:00, "pagi" = 09:00, "siang" = 13:00, "sore" = 16:00, "malam" = 20:00
+9. Jika ada "jam X" spesifik, gunakan itu sebagai time (DEADLINE), BUKAN reminder_time
+10. reminder_time HANYA jika user secara eksplisit bilang "ingetin jam X" atau "reminder jam X"
+11. Deteksi urgency dari kata kunci: urgent, segera, penting, deadline, dll
+12. Kategori berdasarkan konteks: tugas/kuliah = kuliah, meeting/rapat = kerja, olahraga/mandi/bangun = kesehatan, dll
+13. Jika benar-benar tidak bisa diparse, confidence = 0
 
 Hari ini: ${todayStr} (${todayDay})
 Waktu sekarang: ${String(jakartaNow.getHours()).padStart(2,'0')}:${String(jakartaNow.getMinutes()).padStart(2,'0')}`;
