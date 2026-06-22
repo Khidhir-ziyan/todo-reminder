@@ -23,7 +23,11 @@ const TEMP_DIR = path.join(__dirname, '..', 'temp');
 
 async function transcribeAudio(audioFilePath) {
   try {
-    const client = new speech.SpeechClient();
+    // Support API key atau default credentials
+    const clientOptions = process.env.GOOGLE_CLOUD_API_KEY
+      ? { apiKey: process.env.GOOGLE_CLOUD_API_KEY }
+      : {};
+    const client = new speech.SpeechClient(clientOptions);
     const audioBytes = fs.readFileSync(audioFilePath).toString('base64');
 
     const request = {
