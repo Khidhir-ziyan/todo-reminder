@@ -5,7 +5,7 @@ const { startScheduler } = require('./scheduler');
 const { initLLM } = require('./llm');
 
 // Validasi environment variables
-const requiredEnv = ['TELEGRAM_BOT_TOKEN', 'SMTP_EMAIL', 'SMTP_PASSWORD', 'REMINDER_EMAIL'];
+const requiredEnv = ['TELEGRAM_BOT_TOKEN', 'SMTP_USER', 'SMTP_PASS', 'DEFAULT_EMAIL_TARGET'];
 for (const envVar of requiredEnv) {
   if (!process.env[envVar]) {
     console.error(`❌ Missing environment variable: ${envVar}`);

@@ -9,12 +9,9 @@ function getNow() {
 
 function getToday() {
   const now = new Date();
-  // Konversi ke Jakarta time
-  const jakartaOffset = 7 * 60; // UTC+7 dalam menit
-  const localOffset = now.getTimezoneOffset();
-  const diff = jakartaOffset + localOffset;
-  const jakartaNow = new Date(now.getTime() + diff * 60 * 1000);
-  return new Date(jakartaNow.getFullYear(), jakartaNow.getMonth(), jakartaNow.getDate());
+  // Menggunakan waktu lokal server (seharusnya sudah Asia/Jakarta)
+  // Return midnight hari ini
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
 }
 
 function getDayName(date) {
@@ -75,13 +72,15 @@ const recurringPatterns = {
 const stopWords = [
   'ingetin', 'ingatkan', 'reminder', 'remind', 'tolong',
   'gw', 'gue', 'saya', 'aku', 'ku', 'dong', 'ya', 'nih',
+  'kamu', 'kau', 'lu', 'loe',
   'tentang', 'buat', 'untuk', 'agar', 'biar',
-  'di', 'pada', 'hari', 'tanggal', 'tgl',
+  'di', 'pada', 'pda', 'hari', 'tanggal', 'tgl',
   'besok', 'lusa', 'sekarang', 'hari ini', 'nanti',
   'pagi', 'siang', 'sore', 'malam', 'subuh',
   'senin', 'selasa', 'rabu', 'kamis', 'jumat', 'sabtu', 'minggu',
   'jam', 'depan', 'lagi', 'yang', 'dan', 'atau',
   'setiap', 'tiap', 'harian', 'mingguan', 'bulanan',
+  'kana', 'kna',
 ];
 
 // ==================== Helper Functions ====================
@@ -172,6 +171,12 @@ function extractTaskName(text) {
     .replace(/(besok|lusa|sekarang|hari ini|nanti)/g, '')
     .replace(/(pagi|siang|sore|malam|subuh|dini hari)/g, '');
 
+  // Buang pattern "X menit/mnt sebelum"
+  cleaned = cleaned.replace(/\d+\s*(menit|mnt|minute|min)\s*(sebelum|sblm|sebelumnya)/gi, '');
+
+  // Buang kata "reminder" dan "ingetin"
+  cleaned = cleaned.replace(/(reminder|ingetin|ingatkan|remind)/gi, '');
+
   // Buang kata urgency (bukan bagian dari task)
   for (const keyword of urgentKeywords) {
     cleaned = cleaned.replace(new RegExp(keyword, 'gi'), '');
@@ -190,7 +195,11 @@ function extractTaskName(text) {
     cleaned = cleaned.replace(regex, '');
   }
 
-  // Bersihkan spasi berlebih dan trim
+  // Buang filler words yang sering muncul
+  cleaned = cleaned.replace(/\b(itu|ya|dong|nih|deh|lah|sih|aja|doang)\b/gi, '');
+
+  // Bersihkan koma, titik, dan spasi berlebih
+  cleaned = cleaned.replace(/[,.\-;:!?]+/g, ' ');
   cleaned = cleaned.replace(/\s+/g, ' ').trim();
 
   // Kapitalisasi huruf pertama setiap kata
@@ -377,6 +386,13 @@ function parseReminder(text) {
   let jamOverride = null;
   let reminderJamOverride = null;
 
+  // Cek apakah ada "X menit sebelum" atau "X mnt sebelum"
+  let reminderMinutesBefore = null;
+  const menitSebelumMatch = text.match(/(\d+)\s*(menit|mnt|menit|minute|min)\s*(sebelum|sblm|sebelumnya)/i);
+  if (menitSebelumMatch) {
+    reminderMinutesBefore = parseInt(menitSebelumMatch[1]);
+  }
+
   // Cek apakah ada "ingetin nya jam X" atau "reminder jam X"
   const reminderJamMatch = text.match(/ingetin\s*(nya)?\s*jam\s*(\d{1,2})[:.]?(\d{2})?/i) ||
                            text.match(/reminder\s*jam\s*(\d{1,2})[:.]?(\d{2})?/i);
@@ -497,7 +513,10 @@ function parseReminder(text) {
   if (parsedDate) {
     const now = getNow();
 
-    if (reminderJamOverride) {
+    if (reminderMinutesBefore !== null) {
+      // "X menit sebelum" → deadline minus X minutes
+      reminderTime = new Date(parsedDate.getTime() - reminderMinutesBefore * 60 * 1000);
+    } else if (reminderJamOverride) {
       reminderTime = new Date(parsedDate);
       const [rh, rm] = reminderJamOverride.split(':').map(Number);
       reminderTime.setHours(rh, rm, 0, 0);
@@ -506,13 +525,8 @@ function parseReminder(text) {
         reminderTime.setDate(reminderTime.getDate() - 1);
       }
     } else {
-      reminderTime = new Date(parsedDate);
-      if (parsedDate.getHours() <= 10) {
-        reminderTime.setDate(reminderTime.getDate() - 1);
-        reminderTime.setHours(20, 0, 0, 0);
-      } else {
-        reminderTime.setHours(reminderTime.getHours() - 1);
-      }
+      // Default: 1 jam sebelum deadline
+      reminderTime = new Date(parsedDate.getTime() - 60 * 60 * 1000);
     }
 
     if (reminderTime <= now) {

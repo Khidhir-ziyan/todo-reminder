@@ -5,9 +5,16 @@ services:
     restart: unless-stopped
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - SMTP_EMAIL=${SMTP_EMAIL}
-      - SMTP_PASSWORD=${SMTP_PASSWORD}
-      - REMINDER_EMAIL=${REMINDER_EMAIL}
+      # SMTP Configuration (sesuai PRD)
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - SMTP_FROM=${SMTP_FROM:-"Reminder Bot <${SMTP_USER}>"}
+      # Email tujuan default
+      - DEFAULT_EMAIL_TARGET=${DEFAULT_EMAIL_TARGET}
+      # LLM (optional)
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
       - TZ=Asia/Jakarta
     volumes:
       - todo-data:/app/data

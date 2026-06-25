@@ -6,6 +6,7 @@ const { formatDate } = require('./parser');
 
 let reminderTask = null;
 let dailySummaryTask = null;
+let retryTask = null;
 
 function startScheduler() {
   // ==================== Reminder Scheduler ====================
@@ -30,18 +31,27 @@ function startScheduler() {
         // Kirim email
         const emailSent = await sendReminder(todo);
 
+        if (emailSent) {
+          // Mark email sent successfully
+          queries.markEmailSent.run(todo.id);
+        } else {
+          // Mark email failed for retry
+          queries.markEmailFailed.run(todo.id);
+          console.log(`📧 Email failed for todo ${todo.id}, will retry in 5 minutes`);
+        }
+
         // Kirim Telegram notification dengan inline buttons
         const bot = getBot();
         if (bot) {
-          const deadlineStr = formatDate(new Date(todo.deadline));
+          const scheduledAtStr = formatDate(new Date(todo.scheduled_at));
           const priorityEmoji = getPriorityEmoji(todo.priority);
           const categoryEmoji = getCategoryEmoji(todo.category);
 
           const msg =
             `🔔 *REMINDER!*\n\n` +
-            `${priorityEmoji} ${categoryEmoji} *${todo.task}*\n` +
-            `📅 *Deadline:* ${deadlineStr}\n` +
-            `${emailSent ? '📧 Email terkirim!' : '❌ Email gagal'}`;
+            `${priorityEmoji} ${categoryEmoji} *${todo.aktivitas}*\n` +
+            `📅 *Waktu:* ${scheduledAtStr}\n` +
+            `${emailSent ? '📧 Email terkirim!' : '❌ Email gagal, akan di-retry 5 menit lagi'}`;
 
           // Inline keyboard buttons
           const { Markup } = require('telegraf');
@@ -66,11 +76,39 @@ function startScheduler() {
           }
         }
 
-        // Tandai sudah di-reminder
-        queries.markReminded.run(todo.id);
+        // Tandai sudah di-reminder (jika belum)
+        if (!todo.is_sent) {
+          queries.markReminded.run(todo.id);
+        }
       }
     } catch (err) {
       console.error('❌ Scheduler error:', err.message);
+    }
+  });
+
+  // ==================== Email Retry Scheduler ====================
+  // Cek setiap menit untuk email yang gagal
+  retryTask = cron.schedule('* * * * *', async () => {
+    try {
+      const failedTodos = queries.getFailedEmails.all();
+
+      if (failedTodos.length === 0) return;
+
+      console.log(`🔄 Retrying ${failedTodos.length} failed email(s)`);
+
+      for (const todo of failedTodos) {
+        const emailSent = await sendReminder(todo);
+
+        if (emailSent) {
+          queries.markEmailSent.run(todo.id);
+          console.log(`✅ Email retry succeeded for todo ${todo.id}`);
+        } else {
+          queries.markEmailFailed.run(todo.id);
+          console.log(`❌ Email retry failed for todo ${todo.id}`);
+        }
+      }
+    } catch (err) {
+      console.error('❌ Retry scheduler error:', err.message);
     }
   });
 
@@ -96,7 +134,7 @@ function startScheduler() {
           msg += `🚨 *${overdueTodos.length} todo OVERDUE:*\n`;
           overdueTodos.forEach(todo => {
             const priorityEmoji = getPriorityEmoji(todo.priority);
-            msg += `  ❌ ${priorityEmoji} ${todo.task}\n`;
+            msg += `  ❌ ${priorityEmoji} ${todo.aktivitas}\n`;
           });
           msg += '\n';
         }
@@ -104,14 +142,14 @@ function startScheduler() {
         if (todayTodos.length > 0) {
           msg += `📋 *${todayTodos.length} todo hari ini:*\n`;
           todayTodos.forEach(todo => {
-            const deadline = new Date(todo.deadline);
-            const hours = String(deadline.getHours()).padStart(2, '0');
-            const minutes = String(deadline.getMinutes()).padStart(2, '0');
+            const scheduledAt = new Date(todo.scheduled_at);
+            const hours = String(scheduledAt.getHours()).padStart(2, '0');
+            const minutes = String(scheduledAt.getMinutes()).padStart(2, '0');
             const priorityEmoji = getPriorityEmoji(todo.priority);
             const categoryEmoji = getCategoryEmoji(todo.category);
             const recurringEmoji = todo.recurring ? '🔁' : '';
 
-            msg += `  ⏰ ${hours}:${minutes} - ${priorityEmoji} ${categoryEmoji} ${todo.task} ${recurringEmoji}\n`;
+            msg += `  ⏰ ${hours}:${minutes} - ${priorityEmoji} ${categoryEmoji} ${todo.aktivitas} ${recurringEmoji}\n`;
           });
           msg += `\n💪 *Semangat hari ini!*`;
         }
@@ -129,12 +167,15 @@ function startScheduler() {
     timezone: 'Asia/Jakarta'
   });
 
-  console.log('⏰ Scheduler started (reminders: every minute, daily summary: 8 AM)');
+  console.log('⏰ Scheduler started (reminders: every minute, retry: every minute, daily summary: 8 AM)');
 }
 
 function stopScheduler() {
   if (reminderTask) {
     reminderTask.stop();
+  }
+  if (retryTask) {
+    retryTask.stop();
   }
   if (dailySummaryTask) {
     dailySummaryTask.stop();

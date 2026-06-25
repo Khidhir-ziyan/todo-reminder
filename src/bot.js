@@ -13,10 +13,13 @@ const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 let bot = null;
-let defaultEmail = process.env.REMINDER_EMAIL;
+let defaultEmail = process.env.DEFAULT_EMAIL_TARGET;
 
 // Simpan email per user (chat_id → email)
 const userEmails = new Map();
+
+// Simpan pending confirmation (chat_id → { aktivitas, scheduledAt, reminderTime, category, urgency, recurring })
+const pendingConfirmations = new Map();
 
 const TEMP_DIR = path.join(__dirname, '..', 'temp');
 
@@ -119,22 +122,52 @@ function getActionButtons(todoId) {
 
 // ==================== Save Todo Helper ====================
 
-function saveTodo(ctx, task, deadline, reminderTime, category = 'general', urgency = 'normal', recurring = null) {
-  const email = userEmails.get(ctx.chat.id) || defaultEmail;
+function saveTodo(ctx, aktivitas, scheduledAt, reminderTime, category = 'general', urgency = 'normal', recurring = null) {
+  const emailTarget = userEmails.get(ctx.chat.id) || defaultEmail;
 
-  if (!email) {
+  if (!emailTarget) {
     ctx.reply(
       `📧 Email belum di-set!\n\nSet dulu: /setemail email@kamu.com`
     );
     return false;
   }
 
+  // Cek apakah waktu sudah lewat
+  const currentTime = new Date();
+  if (scheduledAt < currentTime && !recurring) {
+    // Simpan pending confirmation
+    pendingConfirmations.set(ctx.chat.id, {
+      aktivitas,
+      scheduledAt,
+      reminderTime,
+      category,
+      urgency,
+      recurring,
+    });
+
+    // Saran waktu besok
+    const tomorrow = new Date(scheduledAt);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = formatDate(tomorrow);
+
+    ctx.reply(
+      `⚠️ *Waktu itu sudah lewat!*\n\n` +
+      `📌 Aktivitas: ${aktivitas}\n` +
+      `⏰ Waktu: ${formatDate(scheduledAt)}\n\n` +
+      `Maksudnya *besok* di jam yang sama?\n` +
+      `📅 ${tomorrowStr}\n\n` +
+      `Ketik *ya* untuk konfirmasi, atau ketik waktu baru.`,
+      { parse_mode: 'Markdown' }
+    );
+    return false;
+  }
+
   queries.addTodo.run({
     chatId: ctx.chat.id,
-    task: task,
-    deadline: deadline.toISOString(),
+    aktivitas: aktivitas,
+    scheduledAt: scheduledAt.toISOString(),
     reminderTime: reminderTime.toISOString(),
-    email: email,
+    emailTarget: emailTarget,
     priority: urgency,
     category: category,
     recurring: recurring,
@@ -144,7 +177,7 @@ function saveTodo(ctx, task, deadline, reminderTime, category = 'general', urgen
   // Get the inserted todo ID
   const insertedTodo = queries.getTodosByChat.all(ctx.chat.id).pop();
 
-  const deadlineStr = formatDate(deadline);
+  const scheduledAtStr = formatDate(scheduledAt);
   const reminderStr = formatDate(reminderTime);
 
   // Category emoji
@@ -177,12 +210,14 @@ function saveTodo(ctx, task, deadline, reminderTime, category = 'general', urgen
       weekly: '🔄 Setiap minggu',
       monthly: '🔄 Setiap bulan',
     };
-    recurringText = `\n🔁 *Recurring:* ${recurringLabels[recurring] || recurring}`;
+    recurringText = `\n🔁 *Berulang:* ${recurringLabels[recurring] || recurring}`;
+  } else {
+    recurringText = `\n🔁 *Berulang:* Tidak`;
   }
 
   // Time context
   const now = new Date();
-  const diff = deadline - now;
+  const diff = scheduledAt - now;
   const hoursLeft = Math.floor(diff / (1000 * 60 * 60));
   const daysLeft = Math.floor(hoursLeft / 24);
 
@@ -197,12 +232,12 @@ function saveTodo(ctx, task, deadline, reminderTime, category = 'general', urgen
     timeContext = `📅 *${daysLeft} hari lagi*`;
   }
 
+  // Format pesan konfirmasi sesuai PRD
   ctx.reply(
-    `${priorityIndicator}✅ *Reminder disimpan!*\n\n` +
-    `${categoryEmoji} *Task:* ${task}\n` +
-    `📅 *Deadline:* ${deadlineStr}\n` +
-    `⏰ *Reminder:* ${reminderStr}\n` +
-    `📧 *Email:* ${email}` +
+    `✅ *Reminder berhasil dibuat!*\n\n` +
+    `📌 *Aktivitas :* ${aktivitas}\n` +
+    `⏰ *Waktu      :* ${scheduledAtStr}\n` +
+    `📧 *Email ke  :* ${emailTarget}\n` +
     recurringText +
     (timeContext ? `\n\n${timeContext}` : ''),
     { parse_mode: 'Markdown' }
@@ -232,13 +267,8 @@ async function parseReminderHybrid(text) {
           reminderTime.setDate(reminderTime.getDate() - 1);
         }
       } else {
-        reminderTime = new Date(deadline);
-        if (deadline.getHours() <= 10) {
-          reminderTime.setDate(reminderTime.getDate() - 1);
-          reminderTime.setHours(20, 0, 0, 0);
-        } else {
-          reminderTime.setHours(reminderTime.getHours() - 1);
-        }
+        // Default: 1 jam sebelum deadline
+        reminderTime = new Date(deadline.getTime() - 60 * 60 * 1000);
       }
 
       if (reminderTime <= now) {
@@ -246,8 +276,8 @@ async function parseReminderHybrid(text) {
       }
 
       return {
-        task: llmResult.task,
-        deadline: deadline,
+        aktivitas: llmResult.task,
+        scheduledAt: deadline,
         reminderTime: reminderTime,
         category: llmResult.category || 'general',
         urgency: llmResult.urgency || 'normal',
@@ -259,7 +289,17 @@ async function parseReminderHybrid(text) {
   }
 
   const regexResult = parseReminder(text);
-  return { ...regexResult, source: 'regex' };
+  // Map field names to PRD schema
+  return {
+    aktivitas: regexResult.task,
+    scheduledAt: regexResult.deadline,
+    reminderTime: regexResult.reminderTime,
+    category: regexResult.category,
+    urgency: regexResult.urgency,
+    recurring: regexResult.recurring,
+    raw: regexResult.raw,
+    source: 'regex',
+  };
 }
 
 // ==================== Bot Initialization ====================
@@ -292,27 +332,22 @@ function initBot() {
 
     // Edit message to show completed
     await ctx.editMessageText(
-      `✅ *"${todo.task}"* ditandai selesai! 🎉`,
+      `✅ *"${todo.aktivitas}"* ditandai selesai! 🎉`,
       { parse_mode: 'Markdown' }
     );
 
     // If recurring, create next occurrence
     if (todo.recurring) {
-      const nextDeadline = getNextRecurringDate(new Date(todo.deadline), todo.recurring);
-      const nextReminder = new Date(nextDeadline);
-      if (nextDeadline.getHours() <= 10) {
-        nextReminder.setDate(nextReminder.getDate() - 1);
-        nextReminder.setHours(20, 0, 0, 0);
-      } else {
-        nextReminder.setHours(nextReminder.getHours() - 1);
-      }
+      const nextScheduledAt = getNextRecurringDate(new Date(todo.scheduled_at), todo.recurring);
+      // Default: 1 jam sebelum deadline
+      const nextReminder = new Date(nextScheduledAt.getTime() - 60 * 60 * 1000);
 
       queries.addTodo.run({
         chatId: todo.chat_id,
-        task: todo.task,
-        deadline: nextDeadline.toISOString(),
+        aktivitas: todo.aktivitas,
+        scheduledAt: nextScheduledAt.toISOString(),
         reminderTime: nextReminder.toISOString(),
-        email: todo.email,
+        emailTarget: todo.email_target,
         priority: todo.priority,
         category: todo.category,
         recurring: todo.recurring,
@@ -320,7 +355,7 @@ function initBot() {
       });
 
       ctx.reply(
-        `🔁 *Recurring:* "${todo.task}" dijadwalkan ulang\n📅 Deadline: ${formatDate(nextDeadline)}`,
+        `🔁 *Recurring:* "${todo.aktivitas}" dijadwalkan ulang\n📅 Deadline: ${formatDate(nextScheduledAt)}`,
         { parse_mode: 'Markdown' }
       );
     }
@@ -341,7 +376,7 @@ function initBot() {
     await ctx.answerCbQuery(`⏰ Di-snooze ${minutes} menit`);
 
     await ctx.editMessageText(
-      `⏰ *"${todo.task}"* di-snooze ${minutes} menit\n📅 Reminder: ${formatDate(snoozeUntil)}`,
+      `⏰ *"${todo.aktivitas}"* di-snooze ${minutes} menit\n📅 Reminder: ${formatDate(snoozeUntil)}`,
       { parse_mode: 'Markdown' }
     );
   });
@@ -358,7 +393,7 @@ function initBot() {
     await ctx.answerCbQuery('🗑️ Dihapus!');
 
     await ctx.editMessageText(
-      `🗑️ *"${todo.task}"* dihapus!`,
+      `🗑️ *"${todo.aktivitas}"* dihapus!`,
       { parse_mode: 'Markdown' }
     );
   });
@@ -453,7 +488,7 @@ function initBot() {
 
     const result = await parseReminderHybrid(taskText);
 
-    if (!result.deadline) {
+    if (!result.scheduledAt) {
       const llmHint = await generateHintWithLLM(taskText);
       const hints = generateHint(taskText);
 
@@ -473,7 +508,7 @@ function initBot() {
       return ctx.reply(msg, { parse_mode: 'Markdown' });
     }
 
-    saveTodo(ctx, result.task, result.deadline, result.reminderTime, result.category, result.urgency, result.recurring);
+    saveTodo(ctx, result.aktivitas, result.scheduledAt, result.reminderTime, result.category, result.urgency, result.recurring);
   });
 
   // /today
@@ -486,14 +521,14 @@ function initBot() {
 
     let msg = `📋 *Todo Hari Ini (${todos.length}):*\n\n`;
     todos.forEach((todo, i) => {
-      const deadline = new Date(todo.deadline);
-      const hours = String(deadline.getHours()).padStart(2, '0');
-      const minutes = String(deadline.getMinutes()).padStart(2, '0');
+      const scheduledAt = new Date(todo.scheduled_at);
+      const hours = String(scheduledAt.getHours()).padStart(2, '0');
+      const minutes = String(scheduledAt.getMinutes()).padStart(2, '0');
       const status = todo.status === 'done' ? '✅' : '⏳';
       const categoryEmoji = getCategoryEmoji(todo.category);
       const priorityEmoji = getPriorityEmoji(todo.priority);
 
-      msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.task}*\n`;
+      msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.aktivitas}*\n`;
       msg += `   ⏰ Jam ${hours}:${minutes}\n\n`;
     });
 
@@ -511,14 +546,14 @@ function initBot() {
 
     let msg = `📋 *Todo Besok (${todos.length}):*\n\n`;
     todos.forEach((todo, i) => {
-      const deadline = new Date(todo.deadline);
-      const hours = String(deadline.getHours()).padStart(2, '0');
-      const minutes = String(deadline.getMinutes()).padStart(2, '0');
+      const scheduledAt = new Date(todo.scheduled_at);
+      const hours = String(scheduledAt.getHours()).padStart(2, '0');
+      const minutes = String(scheduledAt.getMinutes()).padStart(2, '0');
       const status = todo.status === 'done' ? '✅' : '⏳';
       const categoryEmoji = getCategoryEmoji(todo.category);
       const priorityEmoji = getPriorityEmoji(todo.priority);
 
-      msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.task}*\n`;
+      msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.aktivitas}*\n`;
       msg += `   ⏰ Jam ${hours}:${minutes}\n\n`;
     });
 
@@ -538,28 +573,28 @@ function initBot() {
 
     const grouped = {};
     todos.forEach(todo => {
-      const deadline = new Date(todo.deadline);
-      const dayKey = deadline.toDateString();
+      const scheduledAt = new Date(todo.scheduled_at);
+      const dayKey = scheduledAt.toDateString();
       if (!grouped[dayKey]) grouped[dayKey] = [];
       grouped[dayKey].push(todo);
     });
 
     for (const [dayKey, dayTodos] of Object.entries(grouped)) {
-      const date = new Date(dayTodos[0].deadline);
+      const date = new Date(dayTodos[0].scheduled_at);
       const dayName = getDayName(date);
       const dateStr = `${date.getDate()}/${date.getMonth() + 1}`;
 
       msg += `*${dayName} (${dateStr}):*\n`;
       dayTodos.forEach(todo => {
-        const deadline = new Date(todo.deadline);
-        const hours = String(deadline.getHours()).padStart(2, '0');
-        const minutes = String(deadline.getMinutes()).padStart(2, '0');
+        const scheduledAt = new Date(todo.scheduled_at);
+        const hours = String(scheduledAt.getHours()).padStart(2, '0');
+        const minutes = String(scheduledAt.getMinutes()).padStart(2, '0');
         const status = todo.status === 'done' ? '✅' : '⏳';
         const categoryEmoji = getCategoryEmoji(todo.category);
         const priorityEmoji = getPriorityEmoji(todo.priority);
         const recurringEmoji = todo.recurring ? '🔁' : '';
 
-        msg += `  ${status} ${priorityEmoji} ${categoryEmoji} ${todo.task} ${recurringEmoji} (⏰${hours}:${minutes})\n`;
+        msg += `  ${status} ${priorityEmoji} ${categoryEmoji} ${todo.aktivitas} ${recurringEmoji} (⏰${hours}:${minutes})\n`;
       });
       msg += '\n';
     }
@@ -591,8 +626,8 @@ function initBot() {
       const isToday = date.toDateString() === today.toDateString();
 
       const dayTodos = todos.filter(t => {
-        const deadline = new Date(t.deadline);
-        return deadline.toDateString() === date.toDateString();
+        const scheduledAt = new Date(t.scheduled_at);
+        return scheduledAt.toDateString() === date.toDateString();
       });
 
       const dayLabel = isToday ? `*▸ ${days[i]} ${date.getDate()} ◂*` : `*${days[i]} ${date.getDate()}*`;
@@ -602,13 +637,13 @@ function initBot() {
       } else {
         msg += `${dayEmojis[i]} ${dayLabel}:\n`;
         dayTodos.forEach(todo => {
-          const deadline = new Date(todo.deadline);
-          const hours = String(deadline.getHours()).padStart(2, '0');
-          const minutes = String(deadline.getMinutes()).padStart(2, '0');
+          const scheduledAt = new Date(todo.scheduled_at);
+          const hours = String(scheduledAt.getHours()).padStart(2, '0');
+          const minutes = String(scheduledAt.getMinutes()).padStart(2, '0');
           const status = todo.status === 'done' ? '✅' : '⏳';
           const priorityEmoji = getPriorityEmoji(todo.priority);
 
-          msg += `   ${status} ${priorityEmoji} ${todo.task} (${hours}:${minutes})\n`;
+          msg += `   ${status} ${priorityEmoji} ${todo.aktivitas} (${hours}:${minutes})\n`;
         });
       }
     }
@@ -670,13 +705,13 @@ function initBot() {
 
     let msg = `🔍 *Hasil pencarian "${keyword}" (${todos.length}):*\n\n`;
     todos.forEach((todo, i) => {
-      const deadline = formatDate(new Date(todo.deadline));
+      const scheduledAt = formatDate(new Date(todo.scheduled_at));
       const status = todo.status === 'done' ? '✅' : '⏳';
       const categoryEmoji = getCategoryEmoji(todo.category);
       const priorityEmoji = getPriorityEmoji(todo.priority);
 
-      msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.task}*\n`;
-      msg += `   📅 ${deadline}\n\n`;
+      msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.aktivitas}*\n`;
+      msg += `   📅 ${scheduledAt}\n\n`;
     });
 
     ctx.reply(msg, { parse_mode: 'Markdown' });
@@ -690,7 +725,7 @@ function initBot() {
       return ctx.reply('📭 Tidak ada todo! Tambah dengan /remind atau kirim voice note.');
     }
 
-    const overdue = todos.filter(t => t.status === 'pending' && new Date(t.deadline) < new Date());
+    const overdue = todos.filter(t => t.status === 'pending' && new Date(t.scheduled_at) < new Date());
     let msg = '';
 
     if (overdue.length > 0) {
@@ -699,15 +734,15 @@ function initBot() {
 
     msg += `📋 *Daftar Todo (${todos.length}):*\n\n`;
     todos.forEach((todo, i) => {
-      const deadline = formatDate(new Date(todo.deadline));
-      const status = todo.status === 'done' ? '✅' : (todo.reminded ? '🔔' : '⏳');
+      const scheduledAt = formatDate(new Date(todo.scheduled_at));
+      const status = todo.status === 'done' ? '✅' : (todo.is_sent ? '🔔' : '⏳');
       const categoryEmoji = getCategoryEmoji(todo.category);
       const priorityEmoji = getPriorityEmoji(todo.priority);
-      const isOverdue = todo.status === 'pending' && new Date(todo.deadline) < new Date();
+      const isOverdue = todo.status === 'pending' && new Date(todo.scheduled_at) < new Date();
       const recurringEmoji = todo.recurring ? '🔁' : '';
 
-      msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.task}*${isOverdue ? ' ⚠️' : ''} ${recurringEmoji}\n`;
-      msg += `   📅 ${deadline}\n`;
+      msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.aktivitas}*${isOverdue ? ' ⚠️' : ''} ${recurringEmoji}\n`;
+      msg += `   📅 ${scheduledAt}\n`;
       msg += `   🆔 ID: \`${todo.id}\`\n\n`;
     });
 
@@ -734,35 +769,30 @@ function initBot() {
     queries.markDone.run(todo.id, ctx.chat.id);
 
     const now = new Date();
-    const deadline = new Date(todo.deadline);
-    const isOnTime = deadline >= now;
+    const scheduledAt = new Date(todo.scheduled_at);
+    const isOnTime = scheduledAt >= now;
 
     let msg = '';
     if (isOnTime) {
-      msg = `✅ *"${todo.task}"* ditandai selesai! 🎉\n\n💪 *Tepat waktu! Good job!*`;
+      msg = `✅ *"${todo.aktivitas}"* ditandai selesai! 🎉\n\n💪 *Tepat waktu! Good job!*`;
     } else {
-      msg = `✅ *"${todo.task}"* ditandai selesai!\n\n⏰ *Agak telat, tapi better late than never!*`;
+      msg = `✅ *"${todo.aktivitas}"* ditandai selesai!\n\n⏰ *Agak telat, tapi better late than never!*`;
     }
 
     ctx.reply(msg, { parse_mode: 'Markdown' });
 
     // If recurring, create next occurrence
     if (todo.recurring) {
-      const nextDeadline = getNextRecurringDate(new Date(todo.deadline), todo.recurring);
-      const nextReminder = new Date(nextDeadline);
-      if (nextDeadline.getHours() <= 10) {
-        nextReminder.setDate(nextReminder.getDate() - 1);
-        nextReminder.setHours(20, 0, 0, 0);
-      } else {
-        nextReminder.setHours(nextReminder.getHours() - 1);
-      }
+      const nextScheduledAt = getNextRecurringDate(new Date(todo.scheduled_at), todo.recurring);
+      // Default: 1 jam sebelum deadline
+      const nextReminder = new Date(nextScheduledAt.getTime() - 60 * 60 * 1000);
 
       queries.addTodo.run({
         chatId: todo.chat_id,
-        task: todo.task,
-        deadline: nextDeadline.toISOString(),
+        aktivitas: todo.aktivitas,
+        scheduledAt: nextScheduledAt.toISOString(),
         reminderTime: nextReminder.toISOString(),
-        email: todo.email,
+        emailTarget: todo.email_target,
         priority: todo.priority,
         category: todo.category,
         recurring: todo.recurring,
@@ -770,7 +800,7 @@ function initBot() {
       });
 
       ctx.reply(
-        `🔁 *Recurring:* "${todo.task}" dijadwalkan ulang\n📅 Deadline: ${formatDate(nextDeadline)}`,
+        `🔁 *Recurring:* "${todo.aktivitas}" dijadwalkan ulang\n📅 Deadline: ${formatDate(nextScheduledAt)}`,
         { parse_mode: 'Markdown' }
       );
     }
@@ -793,7 +823,7 @@ function initBot() {
     const todo = todos[index];
     queries.deleteTodo.run(todo.id, ctx.chat.id);
 
-    ctx.reply(`🗑️ *"${todo.task}"* dihapus!`, { parse_mode: 'Markdown' });
+    ctx.reply(`🗑️ *"${todo.aktivitas}"* dihapus!`, { parse_mode: 'Markdown' });
   });
 
   // ==================== Voice Note Handler ====================
@@ -825,7 +855,7 @@ function initBot() {
 
       const result = await parseReminderHybrid(transcription);
 
-      if (!result.deadline) {
+      if (!result.scheduledAt) {
         const llmHint = await generateHintWithLLM(transcription);
         const hints = generateHint(transcription);
 
@@ -842,7 +872,7 @@ function initBot() {
         return ctx.reply(msg, { parse_mode: 'Markdown' });
       }
 
-      const saved = saveTodo(ctx, result.task, result.deadline, result.reminderTime, result.category, result.urgency, result.recurring);
+      const saved = saveTodo(ctx, result.aktivitas, result.scheduledAt, result.reminderTime, result.category, result.urgency, result.recurring);
 
       if (saved) {
         ctx.reply(
@@ -878,15 +908,15 @@ function initBot() {
 
       let msg = `📋 *Daftar Todo (${todos.length}):*\n\n`;
       todos.forEach((todo, i) => {
-        const deadline = formatDate(new Date(todo.deadline));
-        const status = todo.status === 'done' ? '✅' : (todo.reminded ? '🔔' : '⏳');
+        const scheduledAt = formatDate(new Date(todo.scheduled_at));
+        const status = todo.status === 'done' ? '✅' : (todo.is_sent ? '🔔' : '⏳');
         const categoryEmoji = getCategoryEmoji(todo.category);
         const priorityEmoji = getPriorityEmoji(todo.priority);
-        const isOverdue = todo.status === 'pending' && new Date(todo.deadline) < new Date();
+        const isOverdue = todo.status === 'pending' && new Date(todo.scheduled_at) < new Date();
         const recurringEmoji = todo.recurring ? '🔁' : '';
 
-        msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.task}*${isOverdue ? ' ⚠️' : ''} ${recurringEmoji}\n`;
-        msg += `   📅 ${deadline}\n\n`;
+        msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.aktivitas}*${isOverdue ? ' ⚠️' : ''} ${recurringEmoji}\n`;
+        msg += `   📅 ${scheduledAt}\n\n`;
       });
 
       msg += `\n💡 Ketik "done 1" untuk selesai, "hapus 1" untuk hapus`;
@@ -905,14 +935,14 @@ function initBot() {
 
       let msg = `📋 *Todo Hari Ini (${todos.length}):*\n\n`;
       todos.forEach((todo, i) => {
-        const deadline = new Date(todo.deadline);
-        const hours = String(deadline.getHours()).padStart(2, '0');
-        const minutes = String(deadline.getMinutes()).padStart(2, '0');
+        const scheduledAt = new Date(todo.scheduled_at);
+        const hours = String(scheduledAt.getHours()).padStart(2, '0');
+        const minutes = String(scheduledAt.getMinutes()).padStart(2, '0');
         const status = todo.status === 'done' ? '✅' : '⏳';
         const categoryEmoji = getCategoryEmoji(todo.category);
         const priorityEmoji = getPriorityEmoji(todo.priority);
 
-        msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.task}*\n`;
+        msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.aktivitas}*\n`;
         msg += `   ⏰ Jam ${hours}:${minutes}\n\n`;
       });
 
@@ -930,14 +960,14 @@ function initBot() {
 
       let msg = `📋 *Todo Besok (${todos.length}):*\n\n`;
       todos.forEach((todo, i) => {
-        const deadline = new Date(todo.deadline);
-        const hours = String(deadline.getHours()).padStart(2, '0');
-        const minutes = String(deadline.getMinutes()).padStart(2, '0');
+        const scheduledAt = new Date(todo.scheduled_at);
+        const hours = String(scheduledAt.getHours()).padStart(2, '0');
+        const minutes = String(scheduledAt.getMinutes()).padStart(2, '0');
         const status = todo.status === 'done' ? '✅' : '⏳';
         const categoryEmoji = getCategoryEmoji(todo.category);
         const priorityEmoji = getPriorityEmoji(todo.priority);
 
-        msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.task}*\n`;
+        msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.aktivitas}*\n`;
         msg += `   ⏰ Jam ${hours}:${minutes}\n\n`;
       });
 
@@ -965,8 +995,8 @@ function initBot() {
         const isToday = date.toDateString() === today.toDateString();
 
         const dayTodos = todos.filter(t => {
-          const deadline = new Date(t.deadline);
-          return deadline.toDateString() === date.toDateString();
+          const scheduledAt = new Date(t.scheduled_at);
+          return scheduledAt.toDateString() === date.toDateString();
         });
 
         const dayLabel = isToday ? `*▸ ${days[i]} ${date.getDate()} ◂*` : `*${days[i]} ${date.getDate()}*`;
@@ -976,13 +1006,13 @@ function initBot() {
         } else {
           msg += `📅 ${dayLabel}:\n`;
           dayTodos.forEach(todo => {
-            const deadline = new Date(todo.deadline);
-            const hours = String(deadline.getHours()).padStart(2, '0');
-            const minutes = String(deadline.getMinutes()).padStart(2, '0');
+            const scheduledAt = new Date(todo.scheduled_at);
+            const hours = String(scheduledAt.getHours()).padStart(2, '0');
+            const minutes = String(scheduledAt.getMinutes()).padStart(2, '0');
             const status = todo.status === 'done' ? '✅' : '⏳';
             const priorityEmoji = getPriorityEmoji(todo.priority);
 
-            msg += `   ${status} ${priorityEmoji} ${todo.task} (${hours}:${minutes})\n`;
+            msg += `   ${status} ${priorityEmoji} ${todo.aktivitas} (${hours}:${minutes})\n`;
           });
         }
       }
@@ -1041,14 +1071,14 @@ function initBot() {
       queries.markDone.run(todo.id, ctx.chat.id);
 
       const now = new Date();
-      const deadline = new Date(todo.deadline);
-      const isOnTime = deadline >= now;
+      const scheduledAt = new Date(todo.scheduled_at);
+      const isOnTime = scheduledAt >= now;
 
       let msg = '';
       if (isOnTime) {
-        msg = `✅ *"${todo.task}"* ditandai selesai! 🎉\n\n💪 *Tepat waktu! Good job!*`;
+        msg = `✅ *"${todo.aktivitas}"* ditandai selesai! 🎉\n\n💪 *Tepat waktu! Good job!*`;
       } else {
-        msg = `✅ *"${todo.task}"* ditandai selesai!\n\n⏰ *Agak telat, tapi better late than never!*`;
+        msg = `✅ *"${todo.aktivitas}"* ditandai selesai!\n\n⏰ *Agak telat, tapi better late than never!*`;
       }
 
       return ctx.reply(msg, { parse_mode: 'Markdown' });
@@ -1067,7 +1097,7 @@ function initBot() {
       const todo = todos[index];
       queries.deleteTodo.run(todo.id, ctx.chat.id);
 
-      return ctx.reply(`🗑️ *"${todo.task}"* dihapus!`, { parse_mode: 'Markdown' });
+      return ctx.reply(`🗑️ *"${todo.aktivitas}"* dihapus!`, { parse_mode: 'Markdown' });
     }
 
     // "cari <keyword>", "search <keyword>"
@@ -1082,13 +1112,13 @@ function initBot() {
 
       let msg = `🔍 *Hasil pencarian "${keyword}" (${todos.length}):*\n\n`;
       todos.forEach((todo, i) => {
-        const deadline = formatDate(new Date(todo.deadline));
+        const scheduledAt = formatDate(new Date(todo.scheduled_at));
         const status = todo.status === 'done' ? '✅' : '⏳';
         const categoryEmoji = getCategoryEmoji(todo.category);
         const priorityEmoji = getPriorityEmoji(todo.priority);
 
-        msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.task}*\n`;
-        msg += `   📅 ${deadline}\n\n`;
+        msg += `${i + 1}. ${status} ${priorityEmoji} ${categoryEmoji} *${todo.aktivitas}*\n`;
+        msg += `   📅 ${scheduledAt}\n\n`;
       });
 
       return ctx.reply(msg, { parse_mode: 'Markdown' });
@@ -1122,12 +1152,30 @@ function initBot() {
       );
     }
 
+    // ==================== Handle Confirmation ====================
+
+    if (lower === 'ya' || lower === 'y' || lower === 'yes') {
+      const pending = pendingConfirmations.get(ctx.chat.id);
+      if (pending) {
+        pendingConfirmations.delete(ctx.chat.id);
+
+        // Set waktu ke besok di jam yang sama
+        const tomorrow = new Date(pending.scheduledAt);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+
+        const tomorrowReminder = new Date(pending.reminderTime);
+        tomorrowReminder.setDate(tomorrowReminder.getDate() + 1);
+
+        return saveTodo(ctx, pending.aktivitas, tomorrow, tomorrowReminder, pending.category, pending.urgency, pending.recurring);
+      }
+    }
+
     // ==================== Auto-parse Reminder ====================
 
     const result = await parseReminderHybrid(text);
 
-    if (result.deadline) {
-      saveTodo(ctx, result.task, result.deadline, result.reminderTime, result.category, result.urgency, result.recurring);
+    if (result.scheduledAt) {
+      saveTodo(ctx, result.aktivitas, result.scheduledAt, result.reminderTime, result.category, result.urgency, result.recurring);
     } else {
       const llmHint = await generateHintWithLLM(text);
       const hints = generateHint(text);

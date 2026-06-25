@@ -16,7 +16,7 @@ function initLLM() {
 
 /**
  * Parse pesan natural language menggunakan LLM
- * Returns: { task, date, time, category, urgency, confidence }
+ * Returns: { task, date, time, reminder_time, category, urgency, recurring, confidence }
  */
 async function parseWithLLM(text) {
   if (!client) {
@@ -24,65 +24,83 @@ async function parseWithLLM(text) {
   }
 
   try {
-    // Hitung hari ini di timezone Jakarta
+    // 1. Get current date/time in Asia/Jakarta correctly
     const now = new Date();
-    const jakartaOffset = 7 * 60; // UTC+7
-    const localOffset = now.getTimezoneOffset();
-    const diff = jakartaOffset + localOffset;
-    const jakartaNow = new Date(now.getTime() + diff * 60 * 1000);
-    const todayStr = jakartaNow.toISOString().split('T')[0];
+    const formatter = new Intl.DateTimeFormat('en-CA', { 
+      timeZone: 'Asia/Jakarta', 
+      year: 'numeric', 
+      month: '2-digit', 
+      day: '2-digit' 
+    });
+    const todayStr = formatter.format(now); // Returns YYYY-MM-DD
+
+    // Get current time in Jakarta for the prompt
+    const jakartaTimeStr = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Jakarta',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    }).format(now);
+
     const dayNames = ['Minggu','Senin','Selasa','Rabu','Kamis','Jumat','Sabtu'];
-    const todayDay = dayNames[jakartaNow.getDay()];
+    const jakartaDayName = new Intl.DateTimeFormat('id-ID', {
+      timeZone: 'Asia/Jakarta',
+      weekday: 'long'
+    }).format(now);
 
-    const prompt = `Kamu adalah asisten yang membantu memparse pesan todo/reminder dari bahasa Indonesia sehari-hari.
+    const prompt = `Kamu adalah asisten NLP ahli untuk bot pengingat (reminder bot).
+Tugasmu adalah mengekstrak informasi dari pesan user ke dalam format JSON.
 
-Tugas: Ekstrak informasi dari pesan berikut dan kembalikan dalam format JSON.
+KONTEKS WAKTU:
+- Hari ini: ${todayStr} (${jakartaDayName})
+- Jam sekarang: ${jakartaTimeStr} (WIB/Asia/Jakarta)
 
-Pesan: "${text}"
-
-Kembalikan HANYA JSON (tanpa markdown, tanpa penjelasan) dengan format:
+FORMAT OUTPUT (HANYA JSON):
 {
-  "task": "nama task yang SUDAH DIPERBAIKI typo-nya dan jelas",
-  "date": "tanggal dalam format YYYY-MM-DD atau null jika tidak ada",
-  "time": "waktu DEADLINE dalam format HH:MM (24 jam) atau null jika tidak ada",
-  "reminder_time": "waktu REMINDER dalam format HH:MM (24 jam) atau null jika user sebut 'ingetin jam X'",
+  "task": "nama task (perbaiki typo & buat jelas)",
+  "date": "YYYY-MM-DD atau null jika tidak ada",
+  "time": "HH:mm (waktu kejadian/deadline) atau null jika tidak ada",
+  "reminder_time": "HH:mm (waktu diingatkan) atau null jika tidak ada",
   "category": "kuliah|kerja|belanja|kesehatan|pribadi|keuangan|general",
   "urgency": "urgent|normal|low",
   "recurring": "daily|weekly|monthly|null",
   "confidence": 0.0-1.0
 }
 
-Aturan PENTING:
-1. PERBAIKI TYPO! Contoh: "engitein" → "ingetin", "bsk" → "besok", "tgas" → "tugas"
-2. "besok"/"bsk" = hari ini + 1 hari (bukan hari ini!)
-3. "lusa" = hari ini + 2 hari
-4. Jika ada "besok" + "hari X", gunakan BESOK (bukan hari X berikutnya)
-5. Jika ada "X hari/minggu/bulan lagi", hitung dari hari ini
+ATURAN LOGIKA:
+1. TYPO: Perbaiki kata seperti "engitein" -> "ingetin", "bsk" -> "besok", "tgas" -> "tugas".
+2. DATE: 
+   - "besok"/"bsk" = ${todayStr} + 1 hari.
+   - "lusa" = ${todayStr} + 2 hari.
+   - Jika tidak sebut tanggal, gunakan ${todayStr}.
+3. TIME vs REMINDER_TIME:
+   - "jam X" = waktu kejadian (time).
+   - "ingetin jam X" atau "reminder jam X" = waktu notifikasi (reminder_time).
+   - Jika user bilang "ingetin saya [task] jam X", maka [task] adalah tugasnya, dan jam X adalah reminder_time.
+   - Jika user bilang "[task] jam X", maka jam X adalah time (deadline).
+4. RECURRING:
+   - "setiap hari/tiap hari" -> "daily"
+   - "setiap minggu/mingguan" -> "weekly"
+   - "setiap bulan/bulanan" -> "monthly"
+5. KATEGORI & URGENCY: Tentukan berdasarkan konteks (misal: 'meeting' -> 'kerja', 'obat' -> 'kesehatan').
 
-6. PERBEDAAN TIME vs REMINDER_TIME:
-   - "jam X" yang berdiri sendiri = DEADLINE time (time)
-   - "ingetin jam X" atau "reminder jam X" = REMINDER time (reminder_time)
-   - Contoh: "olahraga jam 6 pagi" → time: "06:00" (DEADLINE)
-   - Contoh: "olahraga jam 6 pagi, ingetin jam 5" → time: "06:00", reminder_time: "05:00"
-   - Contoh: "ingetin saya olahraga jam 6 pagi" → time: "06:00" (DEADLINE, karena "jam 6 pagi" adalah waktu kejadian)
+CONTOH (FEW-SHOT):
+Input: "ingetin saya joging jam 6 pagi"
+Output: {"task": "Joging", "date": "${todayStr}", "time": "06:00", "reminder_time": null, "category": "kesehatan", "urgency": "normal", "recurring": null, "confidence": 1.0}
 
-7. Konversi waktu ke 24 jam: "jam 9 pagi" = 09:00, "jam 2 siang" = 14:00, "jam 9 malam" = 21:00
-8. "subuh" = 05:00, "pagi" = 09:00, "siang" = 13:00, "sore" = 16:00, "malam" = 20:00
-9. Jika ada "jam X" spesifik, gunakan itu sebagai time (DEADLINE), BUKAN reminder_time
-10. reminder_time HANYA jika user secara eksplisit bilang "ingetin jam X" atau "reminder jam X"
+Input: "remind me to drink water every day at 8am"
+Output: {"task": "Minum air putih", "date": "${todayStr}", "time": "08:00", "reminder_time": null, "category": "kesehatan", "urgency": "normal", "recurring": "daily", "confidence": 1.0}
 
-11. RECURRING DETECTION:
-    - "setiap hari", "tiap hari", "harian" → recurring: "daily"
-    - "setiap minggu", "tiap minggu", "mingguan", "setiap senin/selasa/rabu/..." → recurring: "weekly"
-    - "setiap bulan", "tiap bulan", "bulanan" → recurring: "monthly"
-    - Jika tidak ada kata recurring → recurring: null
+Input: "bsk jam 9 ingetin meeting penting"
+Output: {"task": "Meeting penting", "date": "${todayStr}", "time": "09:00", "reminder_time": null, "category": "kerja", "urgency": "urgent", "recurring": null, "confidence": 1.0}
 
-12. Deteksi urgency dari kata kunci: urgent, segera, penting, deadline, dll
-13. Kategori berdasarkan konteks: tugas/kuliah = kuliah, meeting/rapat = kerja, olahraga/mandi/bangun = kesehatan, dll
-14. Jika benar-benar tidak bisa diparse, confidence = 0
+Input: "olahraga jam 6 pagi, ingetin jam 5"
+Output: {"task": "Olahraga", "date": "${todayStr}", "time": "06:00", "reminder_time": "05:00", "category": "kesehatan", "urgency": "normal", "recurring": null, "confidence": 1.0}
 
-Hari ini: ${todayStr} (${todayDay})
-Waktu sekarang: ${String(jakartaNow.getHours()).padStart(2,'0')}:${String(jakartaNow.getMinutes()).padStart(2,'0')}`;
+Input: "belanja bulanan"
+Output: {"task": "Belanja bulanan", "date": "${todayStr}", "time": null, "reminder_time": null, "category": "belanja", "urgency": "normal", "recurring": "monthly", "confidence": 0.9}
+
+Pesan User: "${text}"`;
 
     const response = await client.chat.complete({
       model: 'mistral-tiny',
@@ -90,13 +108,12 @@ Waktu sekarang: ${String(jakartaNow.getHours()).padStart(2,'0')}:${String(jakart
         { role: 'user', content: prompt }
       ],
       temperature: 0.1,
-      maxTokens: 300,
+      maxTokens: 400,
     });
 
     const content = response.choices[0].message.content.trim();
 
     // Parse JSON response
-    // Handle case where LLM might wrap in markdown code blocks
     let jsonStr = content;
     if (content.includes('```')) {
       jsonStr = content.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
@@ -107,34 +124,6 @@ Waktu sekarang: ${String(jakartaNow.getHours()).padStart(2,'0')}:${String(jakart
     // Validate required fields
     if (!parsed.task || parsed.confidence < 0.3) {
       return null;
-    }
-
-    // Pastikan reminder_time ada jika user sebut "ingetin jam X"
-    if (!parsed.reminder_time) {
-      const reminderMatch = text.match(/ingetin\s*(nya)?\s*jam\s*(\d{1,2})/i);
-      if (reminderMatch) {
-        let h = parseInt(reminderMatch[2]);
-        if (h <= 12 && (text.includes('pagi') || text.includes('subuh'))) {
-          // Tetap AM
-        } else if (h <= 12 && (text.includes('sore') || text.includes('malam'))) {
-          h += 12;
-        }
-        parsed.reminder_time = `${String(h).padStart(2, '0')}:00`;
-      }
-    }
-
-    // Deteksi recurring jika belum terdeteksi
-    if (!parsed.recurring) {
-      const lower = text.toLowerCase();
-      if (lower.includes('setiap hari') || lower.includes('tiap hari') || lower.includes('harian')) {
-        parsed.recurring = 'daily';
-      } else if (lower.includes('setiap minggu') || lower.includes('tiap minggu') || lower.includes('mingguan')) {
-        parsed.recurring = 'weekly';
-      } else if (lower.match(/setiap\s+(senin|selasa|rabu|kamis|jumat|sabtu|minggu)/i)) {
-        parsed.recurring = 'weekly';
-      } else if (lower.includes('setiap bulan') || lower.includes('tiap bulan') || lower.includes('bulanan')) {
-        parsed.recurring = 'monthly';
-      }
     }
 
     return parsed;
